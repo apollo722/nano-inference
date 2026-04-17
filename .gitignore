@@ -38,9 +38,3 @@ test-models/
 
 # Local test files
 test-files/
-
-# Agent files
-GEMINI.md
-
-# Misc. files
-PLAN.md
