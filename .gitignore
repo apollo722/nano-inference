@@ -38,3 +38,7 @@ test-models/
 
 # Local test files
 test-files/
+
+# Local reference files
+GEMINI.md
+PLAN.md
