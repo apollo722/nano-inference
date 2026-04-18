@@ -23,6 +23,7 @@ DTYPE_MAP = {
     "float32": torch.float32,
 }
 
+
 @register_inferencer
 class TorchInferencer(InferencerBase):
     name = "torch"

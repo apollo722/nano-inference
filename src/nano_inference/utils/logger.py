@@ -12,7 +12,7 @@ def setup_logger(
 
     if logger.handlers:
         return logger
-    
+
     logger.setLevel(level)
 
     if log_format is None:
@@ -20,7 +20,7 @@ def setup_logger(
             "%(asctime)s.%(msecs)03d [%(levelname)s] "
             "%(filename)s:%(lineno)d - %(message)s"
         )
-    
+
     formatter = logging.Formatter(
         fmt=log_format,
         datefmt="%Y-%m-%d %H:%M:%S",

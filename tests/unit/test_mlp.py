@@ -1,6 +1,7 @@
 import torch
 from nano_inference.layers.mlp import NaiveSwiGLUMLP
 
+
 def test_mlp_output_shape():
     hidden_size = 16
     intermediate_size = 32
@@ -8,6 +9,7 @@ def test_mlp_output_shape():
     x = torch.randn(2, 4, hidden_size)
     out = mlp(x)
     assert out.shape == (2, 4, hidden_size)
+
 
 def test_mlp_intermediate_projection():
     hidden_size = 16
@@ -18,8 +20,10 @@ def test_mlp_intermediate_projection():
     assert mlp.up_proj.weight.shape == (intermediate_size, hidden_size)
     assert mlp.down_proj.weight.shape == (hidden_size, intermediate_size)
 
+
 def test_swiglu_mlp_matches_manual_formula():
     import torch.nn.functional as F
+
     hidden_size = 4
     intermediate_size = 8
     mlp = NaiveSwiGLUMLP(hidden_size, intermediate_size)
@@ -32,6 +36,7 @@ def test_swiglu_mlp_matches_manual_formula():
     expected = mlp.down_proj(F.silu(gate) * up)
 
     torch.testing.assert_close(y, expected)
+
 
 def test_swiglu_mlp_preserves_batch_and_sequence_shape():
     hidden_size = 16
