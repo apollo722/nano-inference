@@ -12,9 +12,10 @@ from nano_inference.api.protocol import (
 from nano_inference.core.config import ModelConfig
 from nano_inference.core.request import GenerationInputs, Request
 from nano_inference.core.sampling import SamplingParams
-from nano_inference.driver import SyncDriver
+from nano_inference.driver import AsyncDriver
 from nano_inference.engine import SingleWorkerEngine
 from nano_inference.input_processor import ChatTemplateInputProcessor
+from nano_inference.scheduler import OrcaScheduler
 from transformers import AutoTokenizer
 
 
@@ -28,7 +29,8 @@ class AppState:
         )
         self.input_processor = ChatTemplateInputProcessor(self.tokenizer)
         self.engine = SingleWorkerEngine(inferencer_type, config)
-        self.driver = SyncDriver(self.engine)
+        self.scheduler = OrcaScheduler(max_batch_size=1)
+        self.driver = AsyncDriver(self.engine, self.scheduler)
 
 
 def create_lifespan(config: ModelConfig, inferencer_type: str):
@@ -36,7 +38,9 @@ def create_lifespan(config: ModelConfig, inferencer_type: str):
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         """FastAPI Lifespan to initialize shared state on startup."""
         app.state.state = AppState(config, inferencer_type)
+        app.state.state.driver.start()
         yield
+        app.state.state.driver.stop()
         app.state.state = None
 
     return lifespan
