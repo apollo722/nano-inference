@@ -30,10 +30,8 @@ class Worker(WorkerBase):
         self.inferencer = InferencerFactory.create(inferencer_type, model_config)
 
     def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
-        outputs: List[GenerateOutput] = []
+        requests: List[Request] = []
         for query in queries:
-            # Bridge: current Inferencer expects Request, so we reconstruct one.
-            # This bridge disappears in Phase 2 when Inferencer accepts batched queries.
             request = Request(
                 request_id=query.request_id,
                 generation_inputs=query.generation_inputs,
@@ -41,6 +39,5 @@ class Worker(WorkerBase):
                 eos_token_id=query.eos_token_id,
                 arrival_time=query.arrival_time,
             )
-            output = self.inferencer.generate(request)
-            outputs.append(output)
-        return outputs
+            requests.append(request)
+        return self.inferencer.generate_batch(requests)
