@@ -94,12 +94,12 @@ def test_hf_vlm_generate_from_messages_greedy_4_tokens(tmp_path: Path):
     )
 
     out = inf.generate(req)
-    
+
     # We don't assert exact text; just ensure we got a short, non-empty string.
     decoded = inf.tokenizer.decode(out.output_token_ids, skip_special_tokens=True)
     assert isinstance(decoded, str)
     assert len(decoded.strip()) > 0
-    
+
     # Approximate new token count >= 1
     approx_tokens = inf.tokenizer.encode(decoded, add_special_tokens=False)
     assert len(approx_tokens) >= 1
