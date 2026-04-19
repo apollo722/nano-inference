@@ -2,9 +2,10 @@ import asyncio
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, List
+from typing import Any, AsyncGenerator, List, Optional, Union
 
-from nano_inference.core.config import ModelConfig, SchedulerConfig
+import torch
+from nano_inference.core.config import ModelConfig, RuntimeConfig, SchedulerConfig
 from nano_inference.core.request import (
     FinishedReason,
     GenerateOutput,
@@ -75,7 +76,7 @@ class AsyncDriver(DriverBase):
         engine: EngineBase,
         scheduler: SchedulerBase,
         input_processor: Any,
-        config: SchedulerConfig = None,
+        config: Union[RuntimeConfig, SchedulerConfig] = None,
     ):
         self.engine = engine
         self.scheduler = scheduler
@@ -87,6 +88,23 @@ class AsyncDriver(DriverBase):
         self._generate_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._last_stats_log_time = 0.0
+
+        # Log active batching settings
+        sc = self._get_sched_config()
+        if sc:
+            logger.info(
+                f"[Driver] Batching enabled: max_batch={sc.max_batch_size}, "
+                f"max_prefill={sc.max_prefill_batch_size}, "
+                f"delay={sc.prefill_batch_delay}s"
+            )
+
+    def _get_sched_config(self) -> Optional[SchedulerConfig]:
+        """Helper to safely extract scheduler config."""
+        if isinstance(self.config, RuntimeConfig):
+            return self.config.scheduler
+        elif isinstance(self.config, SchedulerConfig):
+            return self.config
+        return None
 
     async def generate_async(self, request: Request) -> GenerateOutput:
         """Asynchronous API: wait for and return the final output."""
@@ -212,21 +230,12 @@ class AsyncDriver(DriverBase):
                         break
 
                 # 2. Schedule and execute (NO LOCK HELD)
+                sched_config = self._get_sched_config()
 
                 # Dynamic batching wait logic:
                 # If we have prefills but fewer than max, wait a bit to see if more arrive.
                 # Only do this if we aren't already decoding anything (to not stall active users).
                 stats = self.scheduler.get_stats()
-
-                # Safely get scheduler config
-                from nano_inference.core.config import RuntimeConfig, SchedulerConfig
-
-                sched_config = None
-                if isinstance(self.config, RuntimeConfig):
-                    sched_config = self.config.scheduler
-                elif isinstance(self.config, SchedulerConfig):
-                    sched_config = self.config
-
                 if (
                     sched_config
                     and stats.get("num_decode_waiting", 0) == 0
@@ -237,6 +246,7 @@ class AsyncDriver(DriverBase):
                     time.sleep(sched_config.prefill_batch_delay)
 
                 queries = self.scheduler.schedule()
+
                 if not queries:
                     time.sleep(0.01)
                     continue
