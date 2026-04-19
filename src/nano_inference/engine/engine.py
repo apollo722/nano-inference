@@ -3,6 +3,7 @@ from typing import List
 
 from nano_inference.core.config import ModelConfig
 from nano_inference.core.request import GenerateOutput, GenerateQuery
+from nano_inference.kv_cache import PagedKVCacheAllocator
 from nano_inference.worker import Worker
 
 
@@ -31,8 +32,13 @@ class SingleWorkerEngine(EngineBase):
     Phase 7+ will introduce TPEngine / WorkerGroup for multi-GPU.
     """
 
-    def __init__(self, inferencer_type: str, model_config: ModelConfig):
-        self.worker = Worker(inferencer_type, model_config)
+    def __init__(
+        self,
+        inferencer_type: str,
+        model_config: ModelConfig,
+        allocator: PagedKVCacheAllocator = None,
+    ):
+        self.worker = Worker(inferencer_type, model_config, allocator=allocator)
 
     def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
         return self.worker.generate(queries)

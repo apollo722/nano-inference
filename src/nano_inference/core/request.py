@@ -43,6 +43,8 @@ class GenerateQuery:
         eos_token_id: Union[int, List[int]],
         arrival_time: float,
     ):
+        from nano_inference.kv_cache.block import KVCacheBlock
+
         self.request_id = request_id
         self.generation_inputs = generation_inputs
         self.sampling_params = sampling_params
@@ -53,6 +55,7 @@ class GenerateQuery:
         self.arrival_time = arrival_time
         self.first_token_time: Optional[float] = None
         self.previous_tokens_len = 0  # For incremental detokenization
+        self.kv_cache_block: Optional[KVCacheBlock] = None
 
     @classmethod
     def from_request(cls, request: Request) -> "GenerateQuery":

@@ -16,12 +16,18 @@ from nano_inference.api.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
-from nano_inference.core.config import ModelConfig, RuntimeConfig, SchedulerConfig
+from nano_inference.core.config import (
+    KVCacheConfig,
+    ModelConfig,
+    RuntimeConfig,
+    SchedulerConfig,
+)
 from nano_inference.core.request import Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.driver import AsyncDriver
 from nano_inference.engine import SingleWorkerEngine
 from nano_inference.input_processor import ChatTemplateInputProcessor
+from nano_inference.kv_cache import PagedKVCacheAllocator
 from nano_inference.scheduler import OrcaScheduler
 from nano_inference.utils.logger import logger
 from transformers import AutoTokenizer
@@ -37,7 +43,38 @@ class AppState:
         )
         self.input_processor = ChatTemplateInputProcessor(self.tokenizer)
         self.engine = SingleWorkerEngine(inferencer_type, config.model)
-        self.scheduler = OrcaScheduler(config.scheduler)
+
+        # Initialize KV Cache Allocator
+        # We extract model metadata from the loaded model for correct cache sizing.
+        # (Assuming single worker/inferencer for Phase 3)
+        model = self.engine.worker.inferencer.model
+        if model is not None:
+            num_kv_heads = (
+                getattr(model.config, "num_kv_heads", None) or model.config.num_heads
+            )
+            head_dim = getattr(model.config, "head_dim", None) or (
+                model.config.hidden_size // model.config.num_heads
+            )
+            dtype = next(model.parameters()).dtype
+        else:
+            # Baseline HF might not expose model directly easily, use defaults
+            num_kv_heads = 16
+            head_dim = 128
+            dtype = torch.float32
+
+        # Phase 3: Simple fixed block count for now (e.g. 1024)
+        num_blocks = 1024
+
+        self.allocator = PagedKVCacheAllocator(
+            num_blocks=num_blocks,
+            block_size=config.kv_cache.block_size,
+            num_heads=num_kv_heads,
+            head_dim=head_dim,
+            dtype=dtype,
+            device=config.model.device,
+        )
+
+        self.scheduler = OrcaScheduler(config.scheduler, allocator=self.allocator)
         self.driver = AsyncDriver(
             self.engine, self.scheduler, self.input_processor, config.scheduler
         )

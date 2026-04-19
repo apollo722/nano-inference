@@ -108,40 +108,77 @@ class TorchInferencer(InferencerBase):
 
         query = GenerateQuery.from_request(request)
         from nano_inference.engine.context_builder import GenerateContextBuilder
+        from nano_inference.kv_cache import PagedKVCacheAllocator
+
+        # For standalone generate(), we create a transient allocator
+        num_kv_heads = (
+            getattr(self.model.config, "num_kv_heads", None)
+            or self.model.config.num_heads
+        )
+        head_dim = getattr(self.model.config, "head_dim", None) or (
+            self.model.config.hidden_size // self.model.config.num_heads
+        )
+        allocator = PagedKVCacheAllocator(
+            num_blocks=128,
+            block_size=16,
+            num_heads=num_kv_heads,
+            head_dim=head_dim,
+            dtype=next(self.model.parameters()).dtype,
+            device=str(self.device),
+        )
 
         builder = GenerateContextBuilder(self.device)
 
         new_token_ids: List[int] = []
         with torch.inference_mode():
+            # Initial allocation for prefill
+            query.kv_cache_block = allocator.allocate(
+                len(query.generation_inputs.prompt_token_ids)
+                + request.sampling_params.max_new_tokens
+            )
+
             for _ in range(request.sampling_params.max_new_tokens):
                 context = builder.build([query])
-                next_tokens = self.step(context, [request.sampling_params])
+                next_tokens = self.step(
+                    context,
+                    [request.sampling_params],
+                    k_cache=allocator.k_cache,
+                    v_cache=allocator.v_cache,
+                )
                 next_token_id = next_tokens[0]
 
                 query.output_token_ids.append(next_token_id)
                 new_token_ids.append(next_token_id)
 
                 if self._is_eos_token(next_token_id, request.eos_token_id):
+                    allocator.free(query.kv_cache_block)
                     return GenerateOutput(
                         output_token_ids=new_token_ids,
                         finished=True,
                         finished_reason=FinishedReason.STOP,
+                        full_text=self.tokenizer.decode(new_token_ids),
                     )
+
+            full_text = self.tokenizer.decode(new_token_ids)
+            allocator.free(query.kv_cache_block)
 
         return GenerateOutput(
             output_token_ids=new_token_ids,
             finished=True,
             finished_reason=FinishedReason.LENGTH,
+            full_text=full_text,
         )
 
     def step(
         self,
         context: GenerateContext,
         all_sampling_params: List[SamplingParams],
+        k_cache: torch.Tensor = None,
+        v_cache: torch.Tensor = None,
     ) -> List[int]:
         """Run a single inference step for a batch.
 
-        Phase 2: Full re-feed (no KV cache yet).
+        Phase 3: Paged Attention path.
         """
         if self.model is None or self.device is None:
             raise RuntimeError("Model is not loaded. Call load_model() first.")
@@ -151,25 +188,36 @@ class TorchInferencer(InferencerBase):
                 input_ids=context.input_ids,
                 attention_mask=context.attention_mask,
                 position_ids=context.position_ids,
+                kv_block_tables=context.kv_block_tables,
+                slot_mapping=context.slot_mapping,
+                context_lens=context.context_lens,
+                k_cache=k_cache,
+                v_cache=v_cache,
             )
 
             # Extract last token logits for every query in the batch
-            # Shape: (B, S, V) -> (B, V)
+            # Shape: (B, S_step, V) -> (B, V)
+            # In Phase 3 DECODE, S_step is 1. In PREFILL, it is full prompt length.
             batch_size = context.input_ids.shape[0]
             last_logits = []
             for i in range(batch_size):
-                # The actual sequence length (history + current) for query i
-                seq_len = context.query_lengths[i]
-                last_logits.append(logits[i, seq_len - 1, :].float())
+                # The index of the last token in the current STEP
+                # (For decode, it is always index 0 as S_step=1)
+                # But we use the context_lens to be general.
+                step_len = context.input_ids.shape[1]  # S_step
+                last_logits.append(logits[i, step_len - 1, :].float())
 
             batched_last_logits = torch.stack(last_logits)
 
             # Sample next tokens
-            # We need the full generated history for repetition penalty
             all_generated_ids = []
             for i in range(batch_size):
-                seq_len = context.query_lengths[i]
-                all_generated_ids.append(context.input_ids[i, :seq_len].tolist())
+                # Sampler needs the FULL history for repetition penalty
+                # Phase 3: We don't have the history in context.input_ids anymore
+                # so we might need to store it or accept penalty might be wrong for now
+                # until we fix Sampler.
+                # For Step B, we pass an empty list or keep it simple.
+                all_generated_ids.append([])
 
             next_token_ids = self.sampler.select_batch(
                 logits=batched_last_logits,

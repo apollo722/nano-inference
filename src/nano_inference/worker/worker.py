@@ -6,6 +6,7 @@ from nano_inference.core.config import ModelConfig
 from nano_inference.core.request import GenerateOutput, GenerateQuery
 from nano_inference.engine.context_builder import GenerateContextBuilder
 from nano_inference.inferencer.factory import InferencerFactory
+from nano_inference.kv_cache import PagedKVCacheAllocator
 
 
 class WorkerBase(ABC):
@@ -33,10 +34,16 @@ class Worker(WorkerBase):
     Phase 2+: Inferencer will accept batched input directly.
     """
 
-    def __init__(self, inferencer_type: str, model_config: ModelConfig):
+    def __init__(
+        self,
+        inferencer_type: str,
+        model_config: ModelConfig,
+        allocator: PagedKVCacheAllocator = None,
+    ):
         self.inferencer = InferencerFactory.create(inferencer_type, model_config)
         self.device = torch.device(model_config.device)
         self.context_builder = GenerateContextBuilder(self.device)
+        self.allocator = allocator
 
     def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
         """Monolithic generation path for baselines or single-request drivers."""
@@ -57,4 +64,11 @@ class Worker(WorkerBase):
     def step(self, queries: List[GenerateQuery]) -> List[int]:
         context = self.context_builder.build(queries)
         sampling_params = [q.sampling_params for q in queries]
-        return self.inferencer.step(context, sampling_params)
+
+        # Pass physical KV tensors to the inferencer
+        k_cache = self.allocator.k_cache if self.allocator else None
+        v_cache = self.allocator.v_cache if self.allocator else None
+
+        return self.inferencer.step(
+            context, sampling_params, k_cache=k_cache, v_cache=v_cache
+        )

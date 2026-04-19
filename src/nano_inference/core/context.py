@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -8,12 +8,19 @@ import torch
 class GenerateContext:
     """Batch-level context for a single inference step.
 
-    Since we don't have KV cache yet (Phase 3), every step for every query
-    must include the full sequence history in the input.
+    Phase 3: Now supports Paged Attention metadata.
     """
 
-    input_ids: torch.Tensor  # (B, S_max)
-    attention_mask: torch.Tensor  # (B, S_max)
-    position_ids: torch.Tensor  # (B, S_max)
+    # Model Inputs
+    input_ids: torch.Tensor  # (B, S_step) - S_step is 1 for decode, full for prefill
+    attention_mask: torch.Tensor  # (B, S_total) - Mask for full history
+    position_ids: torch.Tensor  # (B, S_step)
+
+    # KV Cache Metadata
+    context_lens: torch.Tensor  # (B,) - Total sequence length per request
+    kv_block_tables: torch.Tensor  # (B, max_blocks_per_seq) - Physical block IDs
+    slot_mapping: torch.Tensor  # (B, S_step) - Physical slot per token in input_ids
+
+    # Internal Tracking
     request_ids: List[str]
-    query_lengths: List[int]
+    is_prefill: bool

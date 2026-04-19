@@ -78,19 +78,6 @@ class CausalSelfAttentionBase(nn.Module, ABC):
 class NaiveCausalSelfAttention(CausalSelfAttentionBase):
     """
     Causal Self-Attention layer supporting Grouped-Query Attention (GQA).
-
-    Architecture:
-    1. Project input to Q, K, V.
-    2. (Optional) Apply QK-Normalization.
-    3. Apply Rotary Positional Embeddings (RoPE) to Q and K.
-    4. Repeat K, V heads if using GQA.
-    5. Compute Scaled Dot-Product Attention.
-    6. Project concatenated head outputs back to hidden_size.
-
-    Mathematical flow:
-    - Q = xW_q, K = xW_k, V = xW_v
-    - Q, K = RoPE(Q, K, position_ids)
-    - Output = Softmax(QK^T / sqrt(d_k))V * W_o
     """
 
     def __init__(
@@ -160,51 +147,36 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Input Shapes:
-            x: (batch, seq, hidden_size)
-            position_ids: (batch, seq)
-            attention_mask: (batch, seq)
-        """
         batch_size, seq_len, _ = x.shape
 
-        # 1. Project to Q, K, V and reshape to (B, S, num_heads, head_dim)
         q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = self.k_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         v = self.v_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
-        # 2. Apply optional QK normalization
         if self.q_norm is not None:
             q = self.q_norm(q)
         if self.k_norm is not None:
             k = self.k_norm(k)
 
-        # 3. Apply Rotary Positional Embeddings
         q, k = self.rotary(q, k, position_ids)
 
-        # 4. GQA: Repeat KV heads to match Q heads if necessary
         if self.num_kv_heads != self.num_heads:
             num_repeats = self.num_heads // self.num_kv_heads
-            # Shape: (B, S, num_heads, head_dim)
             k = k.repeat_interleave(num_repeats, dim=2)
             v = v.repeat_interleave(num_repeats, dim=2)
 
-        # 5. Transpose to (B, H, S, D) for optimized attention kernels
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # 5.5 Prepare attention mask (Phase 2 fix for continuous batching)
-        # If attention_mask is (B, S), reshape to (B, 1, 1, S) and convert to additive
         if attention_mask is not None and attention_mask.dim() == 2:
             # Convert boolean (True=keep, False=mask) to additive (0=keep, -inf=mask)
             mask_additive = torch.zeros_like(attention_mask, dtype=x.dtype)
             mask_additive = mask_additive.masked_fill(~attention_mask, float("-inf"))
-            # Reshape for broadcasting with (B, H, S, S)
-            attention_mask = mask_additive.view(batch_size, 1, 1, seq_len)
+            # Reshape for broadcasting with (B, H, S_step, S_total)
+            # mask_additive is (B, S_total), we need (B, 1, 1, S_total)
+            attention_mask = mask_additive.view(batch_size, 1, 1, -1)
 
-        # 6. Compute scaled dot-product attention
-        # Shape: (B, num_heads, S, head_dim)
         attn_out = scaled_dot_product_attention(
             q=q,
             k=k,
@@ -213,12 +185,124 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
             is_causal=True,
         )
 
-        # 7. Reshape and project back to hidden_size
-        # Shape: (B, S, hidden_size)
         attn_out = (
             attn_out.transpose(1, 2)
             .contiguous()
             .view(batch_size, seq_len, self.num_heads * self.head_dim)
+        )
+
+        return self.o_proj(attn_out)
+
+
+class PagedCausalSelfAttention(NaiveCausalSelfAttention):
+    """
+    Paged Attention layer.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        kv_block_tables: Optional[torch.Tensor] = None,
+        slot_mapping: Optional[torch.Tensor] = None,
+        context_lens: Optional[torch.Tensor] = None,
+        k_cache: Optional[torch.Tensor] = None,
+        v_cache: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size, seq_step, _ = x.shape
+
+        # 1. Project to Q, K, V
+        q = self.q_proj(x).view(batch_size, seq_step, self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(batch_size, seq_step, self.num_kv_heads, self.head_dim)
+        v = self.v_proj(x).view(batch_size, seq_step, self.num_kv_heads, self.head_dim)
+
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
+
+        # 2. Apply Rotary Positional Embeddings
+        q, k = self.rotary(q, k, position_ids)
+
+        # 3. Write Phase: Scatter current K/V into physical cache
+        if k_cache is not None and v_cache is not None and slot_mapping is not None:
+            flat_slot_mapping = slot_mapping.view(-1)
+            num_kv_heads = self.num_kv_heads
+            head_dim = self.head_dim
+            block_size = k_cache.shape[2]
+
+            k_cache_flat = k_cache.view(-1, num_kv_heads, head_dim)
+            v_cache_flat = v_cache.view(-1, num_kv_heads, head_dim)
+
+            k_cache_flat[flat_slot_mapping] = k.view(-1, num_kv_heads, head_dim)
+            v_cache_flat[flat_slot_mapping] = v.view(-1, num_kv_heads, head_dim)
+
+        # 4. Gather Phase: Reconstruct contiguous K/V for attention
+        if (
+            k_cache is not None
+            and kv_block_tables is not None
+            and context_lens is not None
+        ):
+            max_context_len = context_lens.max().item()
+
+            k_contig = torch.zeros(
+                (batch_size, max_context_len, self.num_kv_heads, self.head_dim),
+                dtype=x.dtype,
+                device=x.device,
+            )
+            v_contig = torch.zeros(
+                (batch_size, max_context_len, self.num_kv_heads, self.head_dim),
+                dtype=x.dtype,
+                device=x.device,
+            )
+
+            for i in range(batch_size):
+                curr_len = context_lens[i].item()
+                b_ids = kv_block_tables[i]
+
+                for token_idx in range(curr_len):
+                    block_idx = token_idx // block_size
+                    block_offset = token_idx % block_size
+                    physical_block_id = b_ids[block_idx].item()
+
+                    k_contig[i, token_idx] = k_cache[
+                        physical_block_id, :, block_offset, :
+                    ]
+                    v_contig[i, token_idx] = v_cache[
+                        physical_block_id, :, block_offset, :
+                    ]
+
+            if self.num_kv_heads != self.num_heads:
+                num_repeats = self.num_heads // self.num_kv_heads
+                k_contig = k_contig.repeat_interleave(num_repeats, dim=2)
+                v_contig = v_contig.repeat_interleave(num_repeats, dim=2)
+
+            k_contig = k_contig.transpose(1, 2)
+            v_contig = v_contig.transpose(1, 2)
+            q = q.transpose(1, 2)
+        else:
+            return super().forward(x, position_ids, attention_mask)
+
+        # 5. Attention Phase
+        if attention_mask is not None and attention_mask.dim() == 2:
+            mask_additive = torch.zeros_like(attention_mask, dtype=x.dtype)
+            mask_additive = mask_additive.masked_fill(~attention_mask, float("-inf"))
+            attention_mask = mask_additive.view(batch_size, 1, 1, -1)
+
+        attn_out = scaled_dot_product_attention(
+            q=q,
+            k=k_contig,
+            v=v_contig,
+            attention_mask=attention_mask,
+            is_causal=True,
+        )
+
+        # 6. Output projection
+        attn_out = (
+            attn_out.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, seq_step, self.num_heads * self.head_dim)
         )
 
         return self.o_proj(attn_out)

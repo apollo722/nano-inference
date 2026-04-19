@@ -2,10 +2,11 @@ import threading
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 from nano_inference.core.config import SchedulerConfig
 from nano_inference.core.request import GenerateQuery, GenerationStage
+from nano_inference.kv_cache import PagedKVCacheAllocator
 from nano_inference.utils.logger import logger
 
 
@@ -112,12 +113,16 @@ class OrcaScheduler(SchedulerBase):
     Phase 2: supports batching (default 32), Phase 3 will ad KV cache for speed.
     """
 
-    def __init__(self, config: SchedulerConfig = None):
+    def __init__(
+        self, config: SchedulerConfig = None, allocator: PagedKVCacheAllocator = None
+    ):
         super().__init__()
         self.config = config or SchedulerConfig()
+        self.allocator = allocator
         self._prefill_waiting: deque[GenerateQuery] = deque()
         self._decode_waiting: deque[GenerateQuery] = deque()
         self._running: Set[str] = set()
+        self._queries: Dict[str, GenerateQuery] = {}  # For lookup by ID
 
     def add_tasks(self, queries: List[GenerateQuery]) -> None:
         with self._lock:
@@ -125,6 +130,7 @@ class OrcaScheduler(SchedulerBase):
                 logger.debug(
                     f"[Scheduler] Adding task {query.request_id} (stage={query.stage})"
                 )
+                self._queries[query.request_id] = query
                 if query.stage == GenerationStage.PREFILL:
                     self._prefill_waiting.append(query)
                 else:
@@ -137,6 +143,19 @@ class OrcaScheduler(SchedulerBase):
             # 1. First, fill with decode requests (prioritize latency)
             while self._decode_waiting and len(batch) < self.config.max_batch_size:
                 query = self._decode_waiting.popleft()
+
+                # Check if KV block needs extension for the next token
+                if self.allocator:
+                    try:
+                        self.allocator.allocate_token(query.kv_cache_block)
+                    except RuntimeError:
+                        # Out of memory for this request. Defer it.
+                        logger.warning(
+                            f"[Scheduler] Deferring decode for {query.request_id}: OOM"
+                        )
+                        self._decode_waiting.append(query)
+                        continue
+
                 self._running.add(query.request_id)
                 batch.append(query)
 
@@ -149,6 +168,21 @@ class OrcaScheduler(SchedulerBase):
                 and prefill_added < self.config.max_prefill_batch_size
             ):
                 query = self._prefill_waiting.popleft()
+
+                # Allocate initial blocks for prefill
+                if self.allocator:
+                    prompt_len = len(query.generation_inputs.prompt_token_ids)
+                    try:
+                        # Allocate for prompt + 1 (for first decode)
+                        query.kv_cache_block = self.allocator.allocate(prompt_len + 1)
+                    except RuntimeError:
+                        # Out of memory for a NEW request. Put it back and stop prefilling.
+                        logger.warning(
+                            f"[Scheduler] Delaying prefill for {query.request_id}: OOM"
+                        )
+                        self._prefill_waiting.appendleft(query)
+                        break
+
                 self._running.add(query.request_id)
                 batch.append(query)
                 prefill_added += 1
@@ -167,13 +201,24 @@ class OrcaScheduler(SchedulerBase):
                     logger.debug(f"[Scheduler] Finishing task {request_id}")
                     self._running.discard(request_id)
 
+                    # Free KV blocks
+                    query = self._queries.pop(request_id, None)
+                    if query and self.allocator:
+                        self.allocator.free(query.kv_cache_block)
+
     def abort_tasks(self, request_ids: Set[str]) -> None:
         with self._lock:
             if not request_ids:
                 logger.debug("[Scheduler] Aborting ALL tasks")
+                # Free all known queries
+                if self.allocator:
+                    for q in self._queries.values():
+                        self.allocator.free(q.kv_cache_block)
+
                 self._prefill_waiting.clear()
                 self._decode_waiting.clear()
                 self._running.clear()
+                self._queries.clear()
                 return
 
             logger.debug(f"[Scheduler] Aborting tasks: {request_ids}")
@@ -185,6 +230,9 @@ class OrcaScheduler(SchedulerBase):
             )
             for request_id in request_ids:
                 self._running.discard(request_id)
+                query = self._queries.pop(request_id, None)
+                if query and self.allocator:
+                    self.allocator.free(query.kv_cache_block)
 
     def get_workload(self) -> int:
         with self._lock:

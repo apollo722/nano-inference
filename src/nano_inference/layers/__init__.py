@@ -1,6 +1,7 @@
 from nano_inference.layers.attention import (
     CausalSelfAttentionBase,
     NaiveCausalSelfAttention,
+    PagedCausalSelfAttention,
 )
 from nano_inference.layers.embedding import (
     NaiveTokenEmbedding,
@@ -32,6 +33,7 @@ __all__ = [
     "NaiveSwiGLUMLP",
     "CausalSelfAttentionBase",
     "NaiveCausalSelfAttention",
+    "PagedCausalSelfAttention",
     "TokenEmbeddingBase",
     "NaiveTokenEmbedding",
     "LogitsProcessorBase",
