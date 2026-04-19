@@ -39,5 +39,5 @@ class BaseInputProcessor(abc.ABC):
     ) -> GenerationInputs:
         raise NotImplementedError
 
-    def decode(self, token_ids: List[int]) -> str:
-        return self.tokenizer.decode(token_ids)
+    def decode(self, token_ids: List[int], skip_special_tokens: bool = False) -> str:
+        return self.tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)

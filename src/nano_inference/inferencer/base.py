@@ -4,6 +4,7 @@ from typing import List
 from nano_inference.core.config import ModelConfig
 from nano_inference.core.context import GenerateContext
 from nano_inference.core.request import GenerateOutput, Request
+from nano_inference.core.sampling import SamplingParams
 
 
 class InferencerBase(ABC):
@@ -19,7 +20,9 @@ class InferencerBase(ABC):
         return [self.generate(request) for request in requests]
 
     @abstractmethod
-    def step(self, context: GenerateContext) -> List[int]:
+    def step(
+        self, context: GenerateContext, all_sampling_params: List[SamplingParams]
+    ) -> List[int]:
         """Run a single inference step for a batch.
 
         Returns a list of newly generated token IDs, one per query in the context.

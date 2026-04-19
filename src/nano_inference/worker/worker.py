@@ -3,7 +3,7 @@ from typing import List
 
 import torch
 from nano_inference.core.config import ModelConfig
-from nano_inference.core.request import GenerateOutput, GenerateQuery, Request
+from nano_inference.core.request import GenerateOutput, GenerateQuery
 from nano_inference.engine.context_builder import GenerateContextBuilder
 from nano_inference.inferencer.factory import InferencerFactory
 
@@ -14,11 +14,6 @@ class WorkerBase(ABC):
     Interface uses List[GenerateQuery] -> List[GenerateOutput] from the start,
     so the ABC stays stable when batching is added in Phase 2.
     """
-
-    @abstractmethod
-    def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
-        """Run generation for a batch of queries."""
-        ...
 
     @abstractmethod
     def step(self, queries: List[GenerateQuery]) -> List[int]:
@@ -37,19 +32,6 @@ class Worker(WorkerBase):
         self.inferencer = InferencerFactory.create(inferencer_type, model_config)
         self.device = torch.device(model_config.device)
         self.context_builder = GenerateContextBuilder(self.device)
-
-    def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
-        requests: List[Request] = []
-        for query in queries:
-            request = Request(
-                request_id=query.request_id,
-                generation_inputs=query.generation_inputs,
-                sampling_params=query.sampling_params,
-                eos_token_id=query.eos_token_id,
-                arrival_time=query.arrival_time,
-            )
-            requests.append(request)
-        return self.inferencer.generate_batch(requests)
 
     def step(self, queries: List[GenerateQuery]) -> List[int]:
         context = self.context_builder.build(queries)

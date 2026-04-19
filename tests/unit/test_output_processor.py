@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 from nano_inference.core.request import (
     FinishedReason,
     GenerateQuery,
@@ -9,7 +11,11 @@ from nano_inference.driver.output_processor import OutputProcessor
 
 
 def test_output_processor_appends_token_and_transitions_stage():
-    processor = OutputProcessor()
+    mock_input_processor = MagicMock()
+    mock_input_processor.decode.side_effect = (
+        lambda ids, *args, **kwargs: f"text_{ids[0]}"
+    )
+    processor = OutputProcessor(mock_input_processor)
 
     q = GenerateQuery(
         request_id="q1",
@@ -27,10 +33,16 @@ def test_output_processor_appends_token_and_transitions_stage():
     assert q.stage == GenerationStage.DECODE
     assert q.output_token_ids == [10]
     assert q.computed_length == 1
+    assert q.delta_text == "text_10"
+    assert q.previous_tokens_len == 1
 
 
 def test_output_processor_handles_eos():
-    processor = OutputProcessor()
+    mock_input_processor = MagicMock()
+    mock_input_processor.decode.side_effect = (
+        lambda ids, *args, **kwargs: f"text_{ids[0]}"
+    )
+    processor = OutputProcessor(mock_input_processor)
 
     q = GenerateQuery(
         request_id="q1",
@@ -50,7 +62,11 @@ def test_output_processor_handles_eos():
 
 
 def test_output_processor_handles_max_new_tokens():
-    processor = OutputProcessor()
+    mock_input_processor = MagicMock()
+    mock_input_processor.decode.side_effect = (
+        lambda ids, *args, **kwargs: f"text_{ids[0]}"
+    )
+    processor = OutputProcessor(mock_input_processor)
 
     q = GenerateQuery(
         request_id="q1",

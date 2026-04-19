@@ -39,21 +39,56 @@ class Sampler(SamplerBase):
         all_generated_ids: List[List[int]],
         all_sampling_params: List[SamplingParams],
     ) -> List[int]:
-        """Select next tokens for a batch of logits.
+        """Select next tokens for a batch of logits using vectorized operations.
 
-        Phase 2: Loops over batch for simplicity.
+        Note: Currently applies same parameters per batch for absolute vectorization
+        but could be extended for per-row parameters.
         """
-        assert logits.shape[0] == len(all_generated_ids) == len(all_sampling_params)
+        batch_size = logits.shape[0]
+        assert batch_size == len(all_generated_ids) == len(all_sampling_params)
 
-        next_token_ids = []
-        for i in range(len(all_generated_ids)):
-            next_token_id = self.select(
+        # 1. Apply repetition penalty (batched if possible, or loop for now as it's complex)
+        for i in range(batch_size):
+            logits[i] = self._apply_repetition_penalty(
                 logits[i],
                 all_generated_ids[i],
-                all_sampling_params[i],
+                all_sampling_params[i].repetition_penalty,
             )
-            next_token_ids.append(next_token_id)
-        return next_token_ids
+
+        # 2. Greedy sampling (temperature=0)
+        # We need to handle mixed temperature in a batch
+        temperatures = torch.tensor(
+            [p.temperature for p in all_sampling_params],
+            device=logits.device,
+            dtype=logits.dtype,
+        )
+        greedy_mask = temperatures == 0
+
+        next_token_ids = torch.zeros(batch_size, dtype=torch.long, device=logits.device)
+
+        if greedy_mask.any():
+            next_token_ids[greedy_mask] = torch.argmax(logits[greedy_mask], dim=-1)
+
+        # 3. Random sampling
+        if (~greedy_mask).any():
+            sample_logits = logits[~greedy_mask] / temperatures[~greedy_mask].unsqueeze(
+                -1
+            )
+
+            # Apply top-k/top-p (currently loops per param set, can be vectorized further if parameters match)
+            for idx, i in enumerate(torch.where(~greedy_mask)[0].tolist()):
+                sample_logits[idx] = self._apply_top_k_top_p(
+                    sample_logits[idx],
+                    top_k=all_sampling_params[i].top_k,
+                    top_p=all_sampling_params[i].top_p,
+                )
+
+            probs = torch.softmax(sample_logits, dim=-1)
+            next_token_ids[~greedy_mask] = torch.multinomial(
+                probs, num_samples=1
+            ).squeeze(-1)
+
+        return next_token_ids.tolist()
 
     @staticmethod
     def _apply_repetition_penalty(

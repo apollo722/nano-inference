@@ -52,6 +52,7 @@ class GenerateQuery:
         self.computed_length = 0
         self.arrival_time = arrival_time
         self.first_token_time: Optional[float] = None
+        self.previous_tokens_len = 0  # For incremental detokenization
 
     @classmethod
     def from_request(cls, request: Request) -> "GenerateQuery":
@@ -69,3 +70,5 @@ class GenerateOutput:
     output_token_ids: List[int]
     finished: bool
     finished_reason: Optional[FinishedReason] = None
+    delta_text: str = ""
+    full_text: str = ""

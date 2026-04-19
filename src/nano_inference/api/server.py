@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Union
+from typing import Any, AsyncGenerator, Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -13,7 +13,7 @@ from nano_inference.api.protocol import (
     CompletionResponse,
 )
 from nano_inference.core.config import ModelConfig, RuntimeConfig, SchedulerConfig
-from nano_inference.core.request import GenerationInputs, Request
+from nano_inference.core.request import Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.driver import AsyncDriver
 from nano_inference.engine import SingleWorkerEngine
@@ -34,7 +34,9 @@ class AppState:
         self.input_processor = ChatTemplateInputProcessor(self.tokenizer)
         self.engine = SingleWorkerEngine(inferencer_type, config.model)
         self.scheduler = OrcaScheduler(config.scheduler)
-        self.driver = AsyncDriver(self.engine, self.scheduler, config.scheduler)
+        self.driver = AsyncDriver(
+            self.engine, self.scheduler, self.input_processor, config.scheduler
+        )
 
 
 def create_lifespan(config: RuntimeConfig, inferencer_type: str):
@@ -88,24 +90,13 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
             )
 
             if not request.stream:
-                # Non-streaming: drain the generator asynchronously
-                output = None
-                async for chunk in state.driver.add_request(internal_request):
-                    output = chunk
+                output = await state.driver.generate_async(internal_request)
 
-                if output is None:
-                    raise RuntimeError("No output generated from driver")
-
-                # Decode output tokens
-                generated_text = state.input_processor.decode(output.output_token_ids)
-                logger.info(f"[API] Request {request_id} completed successfully.")
-
-                # Build response
                 finish_reason = (
                     output.finished_reason.value if output.finished_reason else "stop"
                 )
                 choice = CompletionChoice(
-                    text=generated_text,
+                    text=output.delta_text,  # delta_text IS the generated text for non-streaming
                     index=0,
                     finish_reason=finish_reason,
                 )
@@ -121,17 +112,10 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
 
             # Streaming: return StreamingResponse
             async def stream_generator():
-                logger.debug(f"[API] Stream generator started for {request_id}")
-                previous_tokens_len = 0
                 try:
                     async for output in state.driver.add_request(internal_request):
-                        # Decode only the NEW tokens
-                        new_tokens = output.output_token_ids[previous_tokens_len:]
-                        if not new_tokens and not output.finished:
+                        if not output.delta_text and not output.finished:
                             continue
-
-                        delta_text = state.input_processor.decode(new_tokens)
-                        previous_tokens_len = len(output.output_token_ids)
 
                         finish_reason = None
                         if output.finished:
@@ -142,7 +126,7 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                             )
 
                         choice = CompletionChoice(
-                            text=delta_text,
+                            text=output.delta_text,
                             index=0,
                             finish_reason=finish_reason,
                         )
@@ -156,13 +140,8 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                         )
 
                         yield f"data: {json.dumps(response.model_dump())}\n\n"
-                except Exception as e:
-                    logger.error(
-                        f"[API] Error in stream_generator for {request_id}: {e}"
-                    )
-                    raise
                 finally:
-                    logger.debug(f"[API] Stream generator finished for {request_id}")
+                    pass
 
                 yield "data: [DONE]\n\n"
 
@@ -171,6 +150,13 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
         except Exception as e:
             logger.error(f"[API] Fatal error in completions: {e}", exc_info=True)
             raise
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Any):
+        # Placeholder: will implement full chat completion logic soon
+        raise HTTPException(
+            status_code=501, detail="Chat completions not yet implemented"
+        )
 
     return app
 

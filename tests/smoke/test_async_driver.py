@@ -1,12 +1,13 @@
 import time
 
 import pytest
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, SchedulerConfig
 from nano_inference.core.request import GenerationInputs, Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.driver.driver import AsyncDriver
 from nano_inference.engine.engine import SingleWorkerEngine
 from nano_inference.inferencer.factory import InferencerFactory
+from nano_inference.input_processor import ChatTemplateInputProcessor
 from nano_inference.scheduler.scheduler import SimpleScheduler
 
 from tests.utils import ensure_test_model_downloaded
@@ -34,7 +35,13 @@ def test_async_driver_generates_4_tokens():
 
     engine = SingleWorkerEngine(inferencer_type="torch", model_config=config)
     scheduler = SimpleScheduler()
-    driver = AsyncDriver(engine=engine, scheduler=scheduler)
+    input_processor = ChatTemplateInputProcessor(dummy_inferencer.tokenizer)
+    driver = AsyncDriver(
+        engine=engine,
+        scheduler=scheduler,
+        input_processor=input_processor,
+        config=SchedulerConfig(),
+    )
 
     driver.start()
     try:

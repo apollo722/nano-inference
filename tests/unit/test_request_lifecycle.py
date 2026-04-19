@@ -34,7 +34,8 @@ def config():
 @pytest.mark.asyncio
 async def test_admission_control(mock_engine, config):
     scheduler = SimpleScheduler()
-    driver = AsyncDriver(mock_engine, scheduler, config)
+    mock_input_processor = MagicMock()
+    driver = AsyncDriver(mock_engine, scheduler, mock_input_processor, config)
     driver.start()
 
     try:
@@ -79,7 +80,9 @@ async def test_admission_control(mock_engine, config):
 @pytest.mark.asyncio
 async def test_request_timeout(mock_engine, config):
     scheduler = SimpleScheduler()
-    driver = AsyncDriver(mock_engine, scheduler, config)
+    mock_input_processor = MagicMock()
+    mock_input_processor.decode.side_effect = lambda ids, *args, **kwargs: ""
+    driver = AsyncDriver(mock_engine, scheduler, mock_input_processor, config)
     driver.start()
 
     try:
@@ -111,7 +114,9 @@ async def test_request_timeout(mock_engine, config):
 @pytest.mark.asyncio
 async def test_client_cancellation(mock_engine, config):
     scheduler = SimpleScheduler()
-    driver = AsyncDriver(mock_engine, scheduler, config)
+    mock_input_processor = MagicMock()
+    mock_input_processor.decode.side_effect = lambda ids, *args, **kwargs: ""
+    driver = AsyncDriver(mock_engine, scheduler, mock_input_processor, config)
     driver.start()
 
     try:

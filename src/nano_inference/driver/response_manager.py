@@ -36,11 +36,19 @@ class ResponseManager:
                         )
                         state[2] = True  # Mark as finished naturally
                         break
+
+                    if isinstance(output, Exception):
+                        logger.debug(
+                            f"[ResponseManager] Generator received Exception for {request_id}: {output}"
+                        )
+                        raise output
+
                     yield output
             except Exception as e:
-                logger.error(
-                    f"[ResponseManager] Error in generator for {request_id}: {e}"
-                )
+                if not isinstance(e, (asyncio.CancelledError, GeneratorExit)):
+                    logger.error(
+                        f"[ResponseManager] Error in generator for {request_id}: {e}"
+                    )
                 raise
             finally:
                 logger.debug(
@@ -94,9 +102,11 @@ class ResponseManager:
             self.complete(rid)
 
     def fail(self, request_id: str, exception: Exception) -> None:
-        """Thread-safe signal failure (not fully implemented for stream yet)."""
-        # For now, just end the stream. Proper error propagation can be added later.
-        self.complete(request_id)
+        """Thread-safe signal failure."""
+        if request_id not in self._queues:
+            return
+        queue, loop, _ = self._queues[request_id]
+        loop.call_soon_threadsafe(queue.put_nowait, exception)
 
     def has_request(self, request_id: str) -> bool:
         return request_id in self._queues

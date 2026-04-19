@@ -2,9 +2,9 @@ import asyncio
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, List
 
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, SchedulerConfig
 from nano_inference.core.request import (
     FinishedReason,
     GenerateOutput,
@@ -41,17 +41,25 @@ class DriverBase(ABC):
 class SyncDriver(DriverBase):
     """Synchronous driver: blocks until generation is complete.
 
-    Converts Request -> GenerateQuery at the boundary, then delegates to Engine.
-    Phase 2 will replace this with AsyncDriver that adds a scheduler loop.
+    Phase 2: Updated to use the canonical engine.step() path in a loop.
     """
 
-    def __init__(self, engine: EngineBase):
+    def __init__(self, engine: EngineBase, input_processor: Any):
         self.engine = engine
+        self.output_processor = OutputProcessor(input_processor)
 
     def generate(self, request: Request) -> GenerateOutput:
         query = GenerateQuery.from_request(request)
-        outputs = self.engine.generate([query])
-        return outputs[0]
+
+        while query.stage != GenerationStage.FINISHED:
+            new_token_ids = self.engine.step([query])
+            self.output_processor.process_step_outputs([query], new_token_ids)
+
+        return GenerateOutput(
+            output_token_ids=query.output_token_ids,
+            finished=True,
+            finished_reason=getattr(query, "finished_reason", None),
+        )
 
 
 class AsyncDriver(DriverBase):
@@ -63,36 +71,47 @@ class AsyncDriver(DriverBase):
     """
 
     def __init__(
-        self, engine: EngineBase, scheduler: SchedulerBase, config: ModelConfig = None
+        self,
+        engine: EngineBase,
+        scheduler: SchedulerBase,
+        input_processor: Any,
+        config: SchedulerConfig = None,
     ):
         self.engine = engine
         self.scheduler = scheduler
         self.config = config
         self.response_manager = ResponseManager()
-        self.output_processor = OutputProcessor()
+        self.output_processor = OutputProcessor(input_processor)
 
         self._running = False
         self._generate_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
+    async def generate_async(self, request: Request) -> GenerateOutput:
+        """Asynchronous API: wait for and return the final output."""
+        last_output = None
+        async for output in self.add_request(request):
+            last_output = output
+
+        if last_output is None:
+            raise RuntimeError("Request failed or was aborted before generating output")
+        return last_output
+
     def generate(self, request: Request) -> GenerateOutput:
-        """Blocking API (for backward compatibility). Drain the generator."""
-
-        async def _drain():
-            last_output = None
-            async for output in self.add_request(request):
-                last_output = output
-            return last_output
-
-        # If called from an existing async loop (e.g. FastAPI), use run_coroutine_threadsafe
-        # Otherwise, use asyncio.run (e.g. simple scripts).
+        """Blocking API (for backward compatibility). Assert not in event loop."""
         try:
             loop = asyncio.get_running_loop()
-            # If the current thread is the loop thread, we can't block.
-            # But the blocking generate is only intended for sync callers.
-            return asyncio.run_coroutine_threadsafe(_drain(), loop).result()
+            if loop.is_running():
+                # If we are here, we are in the loop thread. Blocking with .result() will deadlock.
+                raise RuntimeError(
+                    "AsyncDriver.generate() is a blocking call and cannot be used "
+                    "inside a running event loop. Use 'await driver.generate_async(request)' instead."
+                )
+            return asyncio.run(self.generate_async(request))
         except RuntimeError:
-            return asyncio.run(_drain())
+            # No running loop, or explicitly raised above.
+            # If no running loop, we can safely use asyncio.run
+            return asyncio.run(self.generate_async(request))
 
     def add_request(self, request: Request) -> AsyncGenerator[GenerateOutput, None]:
         """Non-blocking API: add request and return an AsyncGenerator of outputs."""
@@ -246,10 +265,12 @@ class AsyncDriver(DriverBase):
                         output_token_ids=query.output_token_ids,
                         finished=(query.stage == GenerationStage.FINISHED),
                         finished_reason=getattr(query, "finished_reason", None),
+                        delta_text=getattr(query, "delta_text", ""),
+                        full_text=getattr(query, "full_text", ""),
                     )
 
                     logger.debug(
-                        f"[Driver] Delivering output for {query.request_id} (finished={output.finished})"
+                        f"[Driver] Delivering output for {query.request_id} (finished={output.finished}, delta_len={len(output.delta_text)})"
                     )
                     self.response_manager.put_output(query.request_id, output)
 

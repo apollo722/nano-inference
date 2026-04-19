@@ -68,14 +68,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    inferencer = TorchInferencer()
-    inferencer.load_model(
-        ModelConfig(
+    from nano_inference.core.config import ModelConfig, RuntimeConfig
+
+    runtime_config = RuntimeConfig(
+        model=ModelConfig(
             model_dir=args.model_dir,
             device=args.device,
             dtype=args.dtype,
         )
     )
+    inferencer = TorchInferencer()
+    inferencer.load_model(runtime_config.model)
 
     # Use the input processor for text-only models
     processor = ChatTemplateInputProcessor(tokenizer=inferencer.tokenizer)

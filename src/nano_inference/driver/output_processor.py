@@ -1,10 +1,13 @@
-from typing import List, Union
+from typing import Any, List, Union
 
 from nano_inference.core.request import FinishedReason, GenerateQuery, GenerationStage
 
 
 class OutputProcessor:
     """Handles the transition of queries after each inference step."""
+
+    def __init__(self, input_processor: Any):
+        self.input_processor = input_processor
 
     def process_step_outputs(
         self, queries: List[GenerateQuery], new_token_ids: List[int]
@@ -16,22 +19,31 @@ class OutputProcessor:
         """
         assert len(queries) == len(new_token_ids)
 
+        for query in queries:
+            if not hasattr(query, "output_text_list"):
+                query.output_text_list = []
+
         for query, token_id in zip(queries, new_token_ids):
             # 1. Update query state with the new token
             query.output_token_ids.append(token_id)
             query.computed_length += 1
 
-            # 2. Transition PREFILL -> DECODE if necessary
+            # 2. Incremental detokenization
+            # Decode only the NEW tokens
+            new_tokens = query.output_token_ids[query.previous_tokens_len :]
+            delta = self.input_processor.decode(new_tokens, skip_special_tokens=False)
+            query.delta_text = delta
+            query.output_text_list.append(delta)
+            query.full_text = "".join(query.output_text_list)
+            query.previous_tokens_len = len(query.output_token_ids)
+
+            # 3. Transition PREFILL -> DECODE if necessary
             if query.stage == GenerationStage.PREFILL:
                 query.stage = GenerationStage.DECODE
 
-            # 3. Check for stop conditions
+            # 4. Check for stop conditions
             if self._is_eos_token(token_id, query.eos_token_id):
                 query.stage = GenerationStage.FINISHED
-                # We use FinishedReason as a property in the response, but the
-                # GenerateOutput (final) should carry this. For the internal
-                # query, the stage being FINISHED is our marker.
-                # However, the Driver will need the reason to build the final response.
                 query.finished_reason = FinishedReason.STOP
                 continue
 
