@@ -4,7 +4,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import List, Set, Tuple
 
+from nano_inference.core.config import SchedulerConfig
 from nano_inference.core.request import GenerateQuery, GenerationStage
+from nano_inference.utils.logger import logger
 
 
 @dataclass
@@ -86,6 +88,12 @@ class SimpleScheduler(SchedulerBase):
 
     def abort_tasks(self, request_ids: Set[str]) -> None:
         with self._lock:
+            if not request_ids:
+                # If empty set, clear EVERYTHING
+                self._waiting.clear()
+                self._running.clear()
+                return
+
             self._waiting = deque(
                 q for q in self._waiting if q.request_id not in request_ids
             )
@@ -104,9 +112,9 @@ class OrcaScheduler(SchedulerBase):
     Phase 2: supports batching (default 32), Phase 3 will ad KV cache for speed.
     """
 
-    def __init__(self, max_batch_size: int = 32):
+    def __init__(self, config: SchedulerConfig = None):
         super().__init__()
-        self.max_batch_size = max_batch_size
+        self.config = config or SchedulerConfig()
         self._prefill_waiting: deque[GenerateQuery] = deque()
         self._decode_waiting: deque[GenerateQuery] = deque()
         self._running: Set[str] = set()
@@ -114,6 +122,9 @@ class OrcaScheduler(SchedulerBase):
     def add_tasks(self, queries: List[GenerateQuery]) -> None:
         with self._lock:
             for query in queries:
+                logger.debug(
+                    f"[Scheduler] Adding task {query.request_id} (stage={query.stage})"
+                )
                 if query.stage == GenerationStage.PREFILL:
                     self._prefill_waiting.append(query)
                 else:
@@ -123,26 +134,49 @@ class OrcaScheduler(SchedulerBase):
         with self._lock:
             batch: List[GenerateQuery] = []
 
-            while self._decode_waiting and len(batch) < self.max_batch_size:
+            # 1. First, fill with decode requests (prioritize latency)
+            while self._decode_waiting and len(batch) < self.config.max_batch_size:
                 query = self._decode_waiting.popleft()
                 self._running.add(query.request_id)
                 batch.append(query)
-            if batch:
-                return batch
 
-            while self._prefill_waiting and len(batch) < self.max_batch_size:
+            # 2. Then, if there is still room, add prefill requests (increase throughput)
+            # Limit number of new prefill requests to protect decode latency
+            prefill_added = 0
+            while (
+                self._prefill_waiting
+                and len(batch) < self.config.max_batch_size
+                and prefill_added < self.config.max_prefill_batch_size
+            ):
                 query = self._prefill_waiting.popleft()
                 self._running.add(query.request_id)
                 batch.append(query)
+                prefill_added += 1
+
+            if batch:
+                logger.debug(
+                    f"[Scheduler] Scheduled batch of {len(batch)} "
+                    f"(decodes={len(batch)-prefill_added}, prefills={prefill_added})"
+                )
             return batch
 
     def finish_tasks(self, request_ids: List[str]) -> None:
         with self._lock:
             for request_id in request_ids:
-                self._running.discard(request_id)
+                if request_id in self._running:
+                    logger.debug(f"[Scheduler] Finishing task {request_id}")
+                    self._running.discard(request_id)
 
     def abort_tasks(self, request_ids: Set[str]) -> None:
         with self._lock:
+            if not request_ids:
+                logger.debug("[Scheduler] Aborting ALL tasks")
+                self._prefill_waiting.clear()
+                self._decode_waiting.clear()
+                self._running.clear()
+                return
+
+            logger.debug(f"[Scheduler] Aborting tasks: {request_ids}")
             self._prefill_waiting = deque(
                 q for q in self._prefill_waiting if q.request_id not in request_ids
             )

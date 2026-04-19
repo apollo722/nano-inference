@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 
 import torch
 from nano_inference.core.config import ModelConfig
+from nano_inference.core.context import GenerateContext
 from nano_inference.core.request import FinishedReason, GenerateOutput, Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.inferencer.base import InferencerBase
@@ -102,28 +103,22 @@ class TorchInferencer(InferencerBase):
         if self.model is None or self.device is None:
             raise RuntimeError("Model is not loaded. Call load_model() first.")
 
-        gen_inputs = request.generation_inputs
-        generated_ids = list(gen_inputs.prompt_token_ids)
-        new_token_ids: List[int] = []
+        # Build a temporary GenerateQuery to reuse the step-based approach
+        from nano_inference.core.request import GenerateQuery
 
+        query = GenerateQuery.from_request(request)
+        from nano_inference.engine.context_builder import GenerateContextBuilder
+
+        builder = GenerateContextBuilder(self.device)
+
+        new_token_ids: List[int] = []
         with torch.inference_mode():
             for _ in range(request.sampling_params.max_new_tokens):
-                input_ids = torch.tensor(
-                    [generated_ids],
-                    dtype=torch.long,
-                    device=self.device,
-                )
+                context = builder.build([query])
+                next_tokens = self.step(context, [request.sampling_params])
+                next_token_id = next_tokens[0]
 
-                logits = self.model(input_ids=input_ids)
-                next_token_logits = logits[0, -1, :].float()
-
-                next_token_id = self.sampler.select(
-                    logits=next_token_logits,
-                    generated_ids=generated_ids,
-                    sampling_params=request.sampling_params,
-                )
-
-                generated_ids.append(next_token_id)
+                query.output_token_ids.append(next_token_id)
                 new_token_ids.append(next_token_id)
 
                 if self._is_eos_token(next_token_id, request.eos_token_id):
@@ -138,6 +133,51 @@ class TorchInferencer(InferencerBase):
             finished=True,
             finished_reason=FinishedReason.LENGTH,
         )
+
+    def step(
+        self,
+        context: GenerateContext,
+        all_sampling_params: List[SamplingParams],
+    ) -> List[int]:
+        """Run a single inference step for a batch.
+
+        Phase 2: Full re-feed (no KV cache yet).
+        """
+        if self.model is None or self.device is None:
+            raise RuntimeError("Model is not loaded. Call load_model() first.")
+
+        with torch.inference_mode():
+            logits = self.model(
+                input_ids=context.input_ids,
+                attention_mask=context.attention_mask,
+                position_ids=context.position_ids,
+            )
+
+            # Extract last token logits for every query in the batch
+            # Shape: (B, S, V) -> (B, V)
+            batch_size = context.input_ids.shape[0]
+            last_logits = []
+            for i in range(batch_size):
+                # The actual sequence length (history + current) for query i
+                seq_len = context.query_lengths[i]
+                last_logits.append(logits[i, seq_len - 1, :].float())
+
+            batched_last_logits = torch.stack(last_logits)
+
+            # Sample next tokens
+            # We need the full generated history for repetition penalty
+            all_generated_ids = []
+            for i in range(batch_size):
+                seq_len = context.query_lengths[i]
+                all_generated_ids.append(context.input_ids[i, :seq_len].tolist())
+
+            next_token_ids = self.sampler.select_batch(
+                logits=batched_last_logits,
+                all_generated_ids=all_generated_ids,
+                all_sampling_params=all_sampling_params,
+            )
+
+        return next_token_ids
 
     @staticmethod
     def _is_eos_token(

@@ -1,8 +1,10 @@
 from abc import ABC, abstractmethod
 from typing import List
 
+import torch
 from nano_inference.core.config import ModelConfig
 from nano_inference.core.request import GenerateOutput, GenerateQuery, Request
+from nano_inference.engine.context_builder import GenerateContextBuilder
 from nano_inference.inferencer.factory import InferencerFactory
 
 
@@ -18,6 +20,11 @@ class WorkerBase(ABC):
         """Run generation for a batch of queries."""
         ...
 
+    @abstractmethod
+    def step(self, queries: List[GenerateQuery]) -> List[int]:
+        """Run a single inference step for a batch of queries."""
+        ...
+
 
 class Worker(WorkerBase):
     """Single-device worker that holds an Inferencer.
@@ -28,6 +35,8 @@ class Worker(WorkerBase):
 
     def __init__(self, inferencer_type: str, model_config: ModelConfig):
         self.inferencer = InferencerFactory.create(inferencer_type, model_config)
+        self.device = torch.device(model_config.device)
+        self.context_builder = GenerateContextBuilder(self.device)
 
     def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
         requests: List[Request] = []
@@ -41,3 +50,8 @@ class Worker(WorkerBase):
             )
             requests.append(request)
         return self.inferencer.generate_batch(requests)
+
+    def step(self, queries: List[GenerateQuery]) -> List[int]:
+        context = self.context_builder.build(queries)
+        sampling_params = [q.sampling_params for q in queries]
+        return self.inferencer.step(context, sampling_params)

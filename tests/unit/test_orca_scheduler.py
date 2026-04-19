@@ -1,5 +1,6 @@
 import time
 
+from nano_inference.core.config import SchedulerConfig
 from nano_inference.core.request import (
     GenerateQuery,
     GenerationInputs,
@@ -11,7 +12,8 @@ from nano_inference.scheduler import OrcaScheduler
 
 
 def test_orca_scheduler_prioritizes_decode_over_prefill():
-    scheduler = OrcaScheduler(max_batch_size=2)
+    config = SchedulerConfig(max_batch_size=2, max_prefill_batch_size=2)
+    scheduler = OrcaScheduler(config=config)
 
     # Add 3 prefill queries
     prefill_queries = []
@@ -54,3 +56,38 @@ def test_orca_scheduler_prioritizes_decode_over_prefill():
     batch2 = scheduler.schedule()
     assert len(batch2) == 2
     assert all(q.request_id.startswith("prefill") for q in batch2)
+
+
+def test_orca_scheduler_respects_max_prefill_limit():
+    # max_prefill_batch_size=1, max_batch_size=4
+    config = SchedulerConfig(max_batch_size=4, max_prefill_batch_size=1)
+    scheduler = OrcaScheduler(config=config)
+
+    # 1. Add 2 prefill queries
+    q1 = GenerateQuery.from_request(
+        Request("q1", GenerationInputs([1]), SamplingParams(), 0, 0)
+    )
+    q2 = GenerateQuery.from_request(
+        Request("q2", GenerationInputs([1]), SamplingParams(), 0, 0)
+    )
+    scheduler.add_tasks([q1, q2])
+
+    # 2. Schedule should only pick 1 prefill
+    batch = scheduler.schedule()
+    assert len(batch) == 1
+    assert batch[0].request_id == "q1"
+    scheduler.finish_tasks(["q1"])
+
+    # 3. Add a decode task
+    q3 = GenerateQuery.from_request(
+        Request("q3", GenerationInputs([1]), SamplingParams(), 0, 0)
+    )
+    q3.stage = GenerationStage.DECODE
+    scheduler.add_tasks([q3])
+
+    # 4. Schedule should pick the decode task AND the remaining prefill task
+    # because max_batch_size is 4 and max_prefill is 1.
+    batch2 = scheduler.schedule()
+    assert len(batch2) == 2
+    assert batch2[0].request_id == "q3"
+    assert batch2[1].request_id == "q2"

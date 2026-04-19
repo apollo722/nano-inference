@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from nano_inference.api.server import create_app
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig
 
 from tests.utils import ensure_test_model_downloaded
 
@@ -14,7 +14,8 @@ from tests.utils import ensure_test_model_downloaded
 def test_api_v1_completions():
     """Test that /v1/completions endpoint works end-to-end through the full stack."""
     model_path = ensure_test_model_downloaded("Qwen/Qwen3-0.6B")
-    config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
+    model_config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
+    config = RuntimeConfig(model=model_config)
     app = create_app(config, inferencer_type="torch")
 
     # Use TestClient within the app context to ensure lifespan is executed

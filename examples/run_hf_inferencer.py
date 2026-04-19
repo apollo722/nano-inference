@@ -62,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Repetition penalty. Use 1.0 to disable.",
     )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to use.",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="float32",
+        help="Data type to use.",
+    )
     return parser
 
 
@@ -72,7 +82,8 @@ def main() -> None:
     inferencer.load_model(
         ModelConfig(
             model_dir=args.model_dir,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            device=args.device,
+            dtype=args.dtype,
         )
     )
 

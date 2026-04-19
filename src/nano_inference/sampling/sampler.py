@@ -33,6 +33,28 @@ class Sampler(SamplerBase):
         probs = torch.softmax(logits, dim=-1)
         return int(torch.multinomial(probs, num_samples=1).item())
 
+    def select_batch(
+        self,
+        logits: torch.Tensor,
+        all_generated_ids: List[List[int]],
+        all_sampling_params: List[SamplingParams],
+    ) -> List[int]:
+        """Select next tokens for a batch of logits.
+
+        Phase 2: Loops over batch for simplicity.
+        """
+        assert logits.shape[0] == len(all_generated_ids) == len(all_sampling_params)
+
+        next_token_ids = []
+        for i in range(len(all_generated_ids)):
+            next_token_id = self.select(
+                logits[i],
+                all_generated_ids[i],
+                all_sampling_params[i],
+            )
+            next_token_ids.append(next_token_id)
+        return next_token_ids
+
     @staticmethod
     def _apply_repetition_penalty(
         logits: torch.Tensor,

@@ -1,0 +1,15 @@
+model:
+  model_dir: "test-models/Qwen--Qwen3-0.6B"
+  max_length: 32768
+  dtype: "float32"
+  device: "cpu"
+
+scheduler:
+  max_batch_size: 32
+  max_prefill_batch_size: 1
+  max_num_requests: 100
+  request_timeout: 300.0
+
+parallel:
+  tp_size: 1
+  pp_size: 1

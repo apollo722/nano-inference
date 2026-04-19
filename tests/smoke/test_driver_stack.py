@@ -1,7 +1,7 @@
 import time
 
 import pytest
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig
 from nano_inference.core.request import GenerationInputs, Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.driver.driver import SyncDriver
@@ -11,8 +11,8 @@ from tests.utils import ensure_test_model_downloaded
 
 
 def _make_driver(model_path: str) -> SyncDriver:
-    config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
-    engine = SingleWorkerEngine(inferencer_type="torch", model_config=config)
+    model_config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
+    engine = SingleWorkerEngine(inferencer_type="torch", model_config=model_config)
     return SyncDriver(engine=engine)
 
 

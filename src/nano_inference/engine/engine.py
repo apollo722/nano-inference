@@ -19,6 +19,11 @@ class EngineBase(ABC):
         """Dispatch queries to worker(s) and collect outputs."""
         ...
 
+    @abstractmethod
+    def step(self, queries: List[GenerateQuery]) -> List[int]:
+        """Run a single inference step for a batch of queries."""
+        ...
+
 
 class SingleWorkerEngine(EngineBase):
     """Engine backed by a single Worker on one device.
@@ -31,3 +36,6 @@ class SingleWorkerEngine(EngineBase):
 
     def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
         return self.worker.generate(queries)
+
+    def step(self, queries: List[GenerateQuery]) -> List[int]:
+        return self.worker.step(queries)

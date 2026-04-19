@@ -1,12 +1,22 @@
+import asyncio
 import threading
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import Future
+from typing import AsyncGenerator
 
-from nano_inference.core.request import GenerateOutput, GenerateQuery, Request
+from nano_inference.core.config import ModelConfig
+from nano_inference.core.request import (
+    FinishedReason,
+    GenerateOutput,
+    GenerateQuery,
+    GenerationStage,
+    Request,
+)
+from nano_inference.driver.output_processor import OutputProcessor
 from nano_inference.driver.response_manager import ResponseManager
 from nano_inference.engine.engine import EngineBase
 from nano_inference.scheduler.scheduler import SchedulerBase
+from nano_inference.utils.logger import logger
 
 
 class DriverBase(ABC):
@@ -52,74 +62,217 @@ class AsyncDriver(DriverBase):
     - Background thread runs scheduling loop
     """
 
-    def __init__(self, engine: EngineBase, scheduler: SchedulerBase):
+    def __init__(
+        self, engine: EngineBase, scheduler: SchedulerBase, config: ModelConfig = None
+    ):
         self.engine = engine
         self.scheduler = scheduler
+        self.config = config
         self.response_manager = ResponseManager()
+        self.output_processor = OutputProcessor()
 
         self._running = False
         self._generate_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
     def generate(self, request: Request) -> GenerateOutput:
-        """Blocking API (for backward compatibility with SyncDriver)."""
-        future = self.add_request(request)
-        return future.result()
+        """Blocking API (for backward compatibility). Drain the generator."""
 
-    def add_request(self, request: Request) -> Future[GenerateOutput]:
-        """Non-blocking API: add request and return Future."""
+        async def _drain():
+            last_output = None
+            async for output in self.add_request(request):
+                last_output = output
+            return last_output
+
+        # If called from an existing async loop (e.g. FastAPI), use run_coroutine_threadsafe
+        # Otherwise, use asyncio.run (e.g. simple scripts).
+        try:
+            loop = asyncio.get_running_loop()
+            # If the current thread is the loop thread, we can't block.
+            # But the blocking generate is only intended for sync callers.
+            return asyncio.run_coroutine_threadsafe(_drain(), loop).result()
+        except RuntimeError:
+            return asyncio.run(_drain())
+
+    def add_request(self, request: Request) -> AsyncGenerator[GenerateOutput, None]:
+        """Non-blocking API: add request and return an AsyncGenerator of outputs."""
         with self._lock:
             if not self._running:
                 raise RuntimeError("AsyncDriver not running - call start() first")
 
-            future = self.response_manager.create_future(request.request_id)
+            # Admission Control (Phase 2.7)
+            if (
+                self.config
+                and self.scheduler.get_workload() >= self.config.max_num_requests
+            ):
+                raise RuntimeError(
+                    f"Server overloaded. Max concurrent requests ({self.config.max_num_requests}) reached."
+                )
+
+            # Define cancellation callback
+            def on_cancel():
+                logger.info(f"Request {request.request_id} cancelled by client.")
+                self.scheduler.abort_tasks({request.request_id})
+
+            gen = self.response_manager.create_stream(
+                request.request_id, on_close=on_cancel
+            )
             query = GenerateQuery.from_request(request)
             self.scheduler.add_tasks([query])
 
-        return future
+        return gen
 
     def start(self) -> None:
         """Start the background scheduling loop."""
         with self._lock:
             if self._running:
                 return
+            logger.info("Starting AsyncDriver background thread...")
             self._running = True
             self._generate_thread = threading.Thread(
                 target=self._generate_loop, daemon=True
             )
             self._generate_thread.start()
 
+    async def stop_async(self) -> None:
+        """Stop the background scheduling loop asynchronously."""
+        logger.info("Stopping AsyncDriver (async)...")
+        with self._lock:
+            if not self._running:
+                logger.info("AsyncDriver already stopped.")
+                return
+            self._running = False
+
+        # 1. Signal all active requests to close immediately.
+        self.response_manager.shutdown()
+
+        # 2. Abort all tasks in scheduler
+        self.scheduler.abort_tasks(set())
+
+        # 3. Wait for the background thread to finish its current step.
+        if self._generate_thread:
+            logger.info("Waiting for AsyncDriver background thread to exit...")
+            # Use asyncio.to_thread to join the thread without blocking the loop
+            try:
+                await asyncio.to_thread(self._generate_thread.join, 10.0)
+            except Exception as e:
+                logger.error(f"Error while joining AsyncDriver thread: {e}")
+
+            if self._generate_thread.is_alive():
+                logger.warning("AsyncDriver thread did not exit within timeout.")
+            else:
+                logger.info("AsyncDriver thread exited cleanly.")
+        else:
+            logger.info("No background thread found to stop.")
+
     def stop(self) -> None:
-        """Stop the background scheduling loop."""
+        """Stop the background scheduling loop synchronously (for non-async callers)."""
         with self._lock:
             if not self._running:
                 return
             self._running = False
 
+        self.response_manager.shutdown()
         if self._generate_thread:
-            self._generate_thread.join(timeout=5.0)
+            self._generate_thread.join(timeout=10.0)
 
     def _generate_loop(self) -> None:
         """Background loop: schedule queries, run engine, deliver responses."""
+        logger.info("AsyncDriver generation loop started.")
+        step_count = 0
         while True:
-            with self._lock:
-                if not self._running:
-                    break
+            try:
+                with self._lock:
+                    if not self._running:
+                        logger.info("AsyncDriver loop stopping flag detected.")
+                        break
 
-            queries = self.scheduler.schedule()
-            if not queries:
-                time.sleep(0.001)
-                continue
+                queries = self.scheduler.schedule()
+                if not queries:
+                    time.sleep(0.001)
+                    continue
 
-            outputs = self.engine.generate(queries)
-            assert len(queries) == len(outputs)
+                step_count += 1
+                batch_size = len(queries)
+                logger.debug(
+                    f"[Driver] Step {step_count} starting for batch of {batch_size}"
+                )
+                start_time = time.time()
 
-            request_ids_to_finish = []
-            for query, output in zip(queries, outputs):
-                request_ids_to_finish.append(query.request_id)
-                if output.finished:
-                    self.response_manager.complete(query.request_id, output)
-                else:
-                    self.scheduler.add_tasks([query])
+                try:
+                    # Step the engine for the current batch
+                    new_token_ids = self.engine.step(queries)
 
-                self.scheduler.finish_tasks(request_ids_to_finish)
+                    # Process outputs and transition states
+                    self.output_processor.process_step_outputs(queries, new_token_ids)
+                except Exception as e:
+                    logger.error(
+                        f"[Driver] Error during inference step {step_count}: {e}",
+                        exc_info=True,
+                    )
+                    for query in queries:
+                        self.response_manager.fail(query.request_id, e)
+                        self.scheduler.finish_tasks([query.request_id])
+                    continue
+
+                elapsed = time.time() - start_time
+                logger.debug(f"[Driver] Step {step_count} completed in {elapsed:.3f}s")
+
+                # Handle results: finish or reschedule
+                reschedule_queries = []
+
+                for query in queries:
+                    # 1. Timeout Handling (Phase 2.7)
+                    if (
+                        self.config
+                        and (time.time() - query.arrival_time)
+                        > self.config.request_timeout
+                    ):
+                        query.stage = GenerationStage.FINISHED
+                        query.finished_reason = FinishedReason.ABORT
+                        logger.warning(
+                            f"[Driver] Request {query.request_id} TIMED OUT."
+                        )
+
+                    # 2. Check if request was cancelled while we were processing the step
+                    if not self.response_manager.has_request(query.request_id):
+                        logger.debug(
+                            f"[Driver] Request {query.request_id} was CANCELLED during step."
+                        )
+                        self.scheduler.finish_tasks([query.request_id])
+                        continue
+
+                    output = GenerateOutput(
+                        output_token_ids=query.output_token_ids,
+                        finished=(query.stage == GenerationStage.FINISHED),
+                        finished_reason=getattr(query, "finished_reason", None),
+                    )
+
+                    logger.debug(
+                        f"[Driver] Delivering output for {query.request_id} (finished={output.finished})"
+                    )
+                    self.response_manager.put_output(query.request_id, output)
+
+                    if query.stage == GenerationStage.FINISHED:
+                        logger.info(
+                            f"[Driver] Request {query.request_id} FINISHED (reason: {output.finished_reason})"
+                        )
+                        self.response_manager.complete(query.request_id)
+                    else:
+                        reschedule_queries.append(query)
+
+                # Always mark tasks as "not running" in the scheduler before rescheduling
+                # to avoid duplicate execution in the same step.
+                self.scheduler.finish_tasks([q.request_id for q in queries])
+
+                if reschedule_queries:
+                    logger.debug(
+                        f"[Driver] Rescheduling {len(reschedule_queries)} queries"
+                    )
+                    self.scheduler.add_tasks(reschedule_queries)
+            except Exception as e:
+                logger.error(
+                    f"[Driver] Fatal error in AsyncDriver loop: {e}", exc_info=True
+                )
+                time.sleep(0.1)
+        logger.info("AsyncDriver generation loop exited.")

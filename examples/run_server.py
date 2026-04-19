@@ -9,7 +9,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the Nano-Inference API server.",
     )
-    parser.add_argument("--model-dir", required=True, help="Local model directory.")
+    parser.add_argument("--model-dir", help="Local model directory.")
     parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=8000,
         help="Port to listen on.",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to a YAML configuration file.",
+    )
     return parser
 
 
@@ -46,15 +51,12 @@ def main() -> None:
     # Import here to avoid circular imports and heavy dependencies before argparse
     import uvicorn
     from nano_inference.api.server import create_app
-    from nano_inference.core.config import ModelConfig
+    from nano_inference.core.config import RuntimeConfig
 
-    config = ModelConfig(
-        model_dir=args.model_dir,
-        device=args.device,
-        dtype=args.dtype,
-    )
+    # Unified load: YAML -> CLI Overrides -> Defaults
+    runtime_config = RuntimeConfig.load(yaml_path=args.config, cli_overrides=vars(args))
 
-    app = create_app(config, inferencer_type=args.inferencer_type)
+    app = create_app(runtime_config, inferencer_type=args.inferencer_type)
 
     uvicorn.run(
         app,

@@ -4,6 +4,7 @@ from typing import List, Optional, Union
 
 import torch
 from nano_inference.core.config import ModelConfig
+from nano_inference.core.context import GenerateContext
 from nano_inference.core.request import (
     FinishedReason,
     GenerateOutput,
@@ -160,6 +161,16 @@ class HuggingFaceInferencer(InferencerBase):
             output_token_ids=new_token_ids,
             finished=True,
             finished_reason=finished_reason,
+        )
+
+    def step(
+        self,
+        context: GenerateContext,
+        all_sampling_params: List[SamplingParams],
+    ) -> List[int]:
+        raise NotImplementedError(
+            "HuggingFaceInferencer does not support single-step batched execution. "
+            "Please use TorchInferencer for Phase 2+ features."
         )
 
     def _build_hf_kwargs(self, request: Request) -> dict:

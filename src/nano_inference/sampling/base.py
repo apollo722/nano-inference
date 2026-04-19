@@ -15,3 +15,11 @@ class SamplerBase(ABC):
         generated_ids: List[int],
         sampling_params: SamplingParams,
     ) -> int: ...
+
+    @abstractmethod
+    def select_batch(
+        self,
+        logits: torch.Tensor,
+        all_generated_ids: List[List[int]],
+        all_sampling_params: List[SamplingParams],
+    ) -> List[int]: ...

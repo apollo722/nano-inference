@@ -38,6 +38,8 @@ def scaled_dot_product_attention(
 
     # Apply external attention mask (e.g., for padding)
     if attention_mask is not None:
+        # attention_mask is expected to be already broadcastable to (B, H, S, S)
+        # and already converted to additive form (0 for keep, -inf for mask)
         scores = scores + attention_mask.to(device=scores.device, dtype=scores.dtype)
 
     # Normalize scores to probabilities along the last dimension
@@ -162,7 +164,7 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         Input Shapes:
             x: (batch, seq, hidden_size)
             position_ids: (batch, seq)
-            attention_mask: (batch, seq, seq)
+            attention_mask: (batch, seq)
         """
         batch_size, seq_len, _ = x.shape
 
@@ -191,6 +193,15 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        # 5.5 Prepare attention mask (Phase 2 fix for continuous batching)
+        # If attention_mask is (B, S), reshape to (B, 1, 1, S) and convert to additive
+        if attention_mask is not None and attention_mask.dim() == 2:
+            # Convert boolean (True=keep, False=mask) to additive (0=keep, -inf=mask)
+            mask_additive = torch.zeros_like(attention_mask, dtype=x.dtype)
+            mask_additive = mask_additive.masked_fill(~attention_mask, float("-inf"))
+            # Reshape for broadcasting with (B, H, S, S)
+            attention_mask = mask_additive.view(batch_size, 1, 1, seq_len)
 
         # 6. Compute scaled dot-product attention
         # Shape: (B, num_heads, S, head_dim)

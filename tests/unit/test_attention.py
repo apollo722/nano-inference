@@ -61,15 +61,30 @@ def test_attention_gqa_output_shape():
     assert attn.k_proj.out_features == num_kv_heads * (hidden_size // num_heads)
 
 
-def test_attention_qk_norm_enabled():
-    hidden_size = 16
-    num_heads = 2
-    attn = NaiveCausalSelfAttention(hidden_size, num_heads, use_qk_norm=True)
+def test_attention_batch_with_mask():
+    hidden_size = 32
+    num_heads = 4
+    attn = NaiveCausalSelfAttention(hidden_size, num_heads)
 
-    assert attn.q_norm is not None
-    assert attn.k_norm is not None
+    # Batch size 3, seq len 5
+    batch_size = 3
+    seq_len = 5
+    x = torch.randn(batch_size, seq_len, hidden_size)
+    position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
 
-    x = torch.randn(1, 2, hidden_size)
-    position_ids = torch.arange(2).unsqueeze(0)
-    out = attn(x, position_ids)
-    assert out.shape == (1, 2, hidden_size)
+    # 2D boolean mask (B, S)
+    # Mask out last 2 tokens for first request, last token for second request, none for third
+    attention_mask = torch.tensor(
+        [
+            [True, True, True, False, False],
+            [True, True, True, True, False],
+            [True, True, True, True, True],
+        ],
+        dtype=torch.bool,
+    )
+
+    out = attn(x, position_ids, attention_mask=attention_mask)
+    assert out.shape == (batch_size, seq_len, hidden_size)
+    # Ensure no NaN or Inf
+    assert not torch.isnan(out).any()
+    assert not torch.isinf(out).any()
