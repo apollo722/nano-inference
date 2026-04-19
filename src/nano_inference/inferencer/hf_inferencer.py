@@ -14,6 +14,7 @@ from nano_inference.core.sampling import SamplingParams
 from nano_inference.envs.utils import ENV_UTILS_PICKLE_DUMP_ENABLED
 from nano_inference.inferencer.base import InferencerBase
 from nano_inference.inferencer.factory import register_inferencer
+from nano_inference.sampling import Sampler
 from nano_inference.utils.logger import logger
 from nano_inference.utils.pickle_ops import dump_pickle
 from transformers import (
@@ -41,6 +42,7 @@ class HuggingFaceInferencer(InferencerBase):
         self.processor = None
         self.device = None
         self.is_vlm = False
+        self.sampler = Sampler()
 
     def load_model(self, model_config: ModelConfig) -> None:
         dtype = DTYPE_MAP.get(model_config.dtype, torch.float16)
@@ -168,10 +170,45 @@ class HuggingFaceInferencer(InferencerBase):
         context: GenerateContext,
         all_sampling_params: List[SamplingParams],
     ) -> List[int]:
-        raise NotImplementedError(
-            "HuggingFaceInferencer does not support single-step batched execution. "
-            "Please use TorchInferencer for Phase 2+ features."
-        )
+        """Run a single inference step for a batch.
+
+        Phase 2: Baseline implementation using HF model forward pass.
+        """
+        if self.model is None or self.device is None:
+            raise RuntimeError("Model is not loaded. Call load_model() first.")
+
+        with torch.inference_mode():
+            # HF models usually expect attention_mask to be 1 for valid, 0 for padding
+            # Our GenerateContext.attention_mask is already boolean (True=keep)
+            outputs = self.model(
+                input_ids=context.input_ids,
+                attention_mask=context.attention_mask.long(),
+                position_ids=context.position_ids,
+            )
+
+            # Extract last token logits
+            logits = outputs.logits
+            batch_size = context.input_ids.shape[0]
+            last_logits = []
+            for i in range(batch_size):
+                seq_len = context.query_lengths[i]
+                last_logits.append(logits[i, seq_len - 1, :].float())
+
+            batched_last_logits = torch.stack(last_logits)
+
+            # Sample next tokens
+            all_generated_ids = []
+            for i in range(batch_size):
+                seq_len = context.query_lengths[i]
+                all_generated_ids.append(context.input_ids[i, :seq_len].tolist())
+
+            next_token_ids = self.sampler.select_batch(
+                logits=batched_last_logits,
+                all_generated_ids=all_generated_ids,
+                all_sampling_params=all_sampling_params,
+            )
+
+        return next_token_ids
 
     def _build_hf_kwargs(self, request: Request) -> dict:
         sp = request.sampling_params
