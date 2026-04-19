@@ -87,6 +87,7 @@ class OrcaScheduler(SchedulerBase):
         self._decode_waiting: deque[GenerateQuery] = deque()
         self._running: Set[str] = set()
         self._queries: Dict[str, GenerateQuery] = {}  # For lookup by ID
+        self._last_batch_size = 0
 
     def add_tasks(self, queries: List[GenerateQuery]) -> None:
         with self._lock:
@@ -199,6 +200,7 @@ class OrcaScheduler(SchedulerBase):
                     f"[Scheduler] Scheduled batch of {len(batch)} "
                     f"(decodes={len(batch)-prefill_added}, prefills={prefill_added})"
                 )
+            self._last_batch_size = len(batch)
             return batch
 
     def on_step_completed(self, request_ids: List[str]) -> None:
@@ -227,6 +229,9 @@ class OrcaScheduler(SchedulerBase):
                     self.allocator.free(query.kv_cache_block)
                     query.kv_cache_block = None
 
+            # Update last batch size after cleanup
+            self._last_batch_size = len(self._running)
+
     def abort_tasks(self, request_ids: Set[str]) -> None:
         with self._lock:
             if not request_ids:
@@ -240,6 +245,7 @@ class OrcaScheduler(SchedulerBase):
                 self._decode_waiting.clear()
                 self._running.clear()
                 self._queries.clear()
+                self._last_batch_size = 0
                 return
 
             logger.debug(f"[Scheduler] Aborting tasks: {request_ids}")
@@ -254,6 +260,7 @@ class OrcaScheduler(SchedulerBase):
                 query = self._queries.pop(request_id, None)
                 if query and self.allocator:
                     self.allocator.free(query.kv_cache_block)
+            self._last_batch_size = len(self._running)
 
     def get_workload(self) -> int:
         with self._lock:
@@ -266,7 +273,7 @@ class OrcaScheduler(SchedulerBase):
     def get_stats(self) -> dict:
         with self._lock:
             stats = {
-                "num_running": len(self._running),
+                "num_running": self._last_batch_size,
                 "num_prefill_waiting": len(self._prefill_waiting),
                 "num_decode_waiting": len(self._decode_waiting),
             }

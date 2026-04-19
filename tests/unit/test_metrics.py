@@ -19,8 +19,9 @@ def test_scheduler_get_stats():
     assert stats["num_running"] == 0
     assert stats["kv_utilization"] == 0.0
 
-    # Simulate allocation
+    # Simulate scheduling
     block = allocator.allocate(num_tokens=4)  # Uses 1 block
+    scheduler._last_batch_size = 1
     scheduler._running.add("test-req")
 
     stats = scheduler.get_stats()
