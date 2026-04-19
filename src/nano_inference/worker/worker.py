@@ -52,6 +52,7 @@ class Worker(WorkerBase):
             return
 
         model = self.inferencer.model
+        num_layers = getattr(model.config, "num_layers", 1)
         num_kv_heads = (
             getattr(model.config, "num_kv_heads", None) or model.config.num_heads
         )
@@ -60,7 +61,7 @@ class Worker(WorkerBase):
         )
 
         num_blocks = self.profile_num_blocks(
-            config, num_kv_heads, head_dim, next(model.parameters()).dtype
+            config, num_layers, num_kv_heads, head_dim, next(model.parameters()).dtype
         )
 
         self.allocator = PagedKVCacheAllocator(
@@ -68,14 +69,16 @@ class Worker(WorkerBase):
             block_size=config.kv_cache.block_size,
             num_heads=num_kv_heads,
             head_dim=head_dim,
+            num_layers=num_layers,
             dtype=next(model.parameters()).dtype,
             device=str(self.device),
         )
-        logger.info(f"[Worker] Initialized PagedKVCache with {num_blocks} blocks.")
+        logger.debug(f"[Worker] Initialized PagedKVCache with {num_blocks} blocks.")
 
     def profile_num_blocks(
         self,
         config: RuntimeConfig,
+        num_layers: int,
         num_kv_heads: int,
         head_dim: int,
         dtype: torch.dtype,
@@ -94,11 +97,16 @@ class Worker(WorkerBase):
         # Available memory for KV cache
         kv_mem_limit = free_mem * config.kv_cache.gpu_memory_utilization
 
-        # Size of one block (K + V) in bytes
+        # Size of one logical block across all layers (K + V) in bytes
         element_size = torch.tensor([], dtype=dtype).element_size()
         # 2 for K and V
         block_size_bytes = (
-            2 * num_kv_heads * config.kv_cache.block_size * head_dim * element_size
+            2
+            * num_layers
+            * num_kv_heads
+            * config.kv_cache.block_size
+            * head_dim
+            * element_size
         )
 
         num_blocks = int(kv_mem_limit // block_size_bytes)
