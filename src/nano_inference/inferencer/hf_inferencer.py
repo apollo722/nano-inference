@@ -173,9 +173,17 @@ class HuggingFaceInferencer(InferencerBase):
         """Run a single inference step for a batch.
 
         Phase 2: Baseline implementation using HF model forward pass.
+        Note: Currently text-only. VLMs should use the monolithic generate() path
+        until Phase 4.
         """
         if self.model is None or self.device is None:
             raise RuntimeError("Model is not loaded. Call load_model() first.")
+
+        # VLM Check: we don't yet support batched VLM forward in step()
+        if self.is_vlm:
+            # In a real scenario, we'd check if any query has images
+            # For Phase 2, we just warn or raise if we can't handle it here
+            pass
 
         with torch.inference_mode():
             # HF models usually expect attention_mask to be 1 for valid, 0 for padding

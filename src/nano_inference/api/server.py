@@ -8,6 +8,10 @@ from typing import Any, AsyncGenerator, Union
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from nano_inference.api.protocol import (
+    ChatCompletionChoice,
+    ChatCompletionMessage,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
     CompletionChoice,
     CompletionRequest,
     CompletionResponse,
@@ -153,14 +157,18 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
 
     @app.post("/v1/chat/completions")
     async def chat_completions(
-        request: CompletionRequest,
+        request: ChatCompletionRequest,
     ):
         state = app.state.state
-        logger.info(f"[API] Received chat completion request. stream={request.stream}")
+        logger.info(
+            f"[API] Received chat completion request. messages={len(request.messages)} stream={request.stream}"
+        )
 
         try:
-            # Simple conversion for now: prompt -> messages
-            messages = [{"role": "user", "content": request.prompt}]
+            # Convert ChatCompletionMessage objects to dicts for the input processor
+            messages = [
+                {"role": m.role, "content": m.content} for m in request.messages
+            ]
             gen_inputs = state.input_processor.encode(
                 messages, add_generation_prompt=True
             )
@@ -185,12 +193,14 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                 finish_reason = (
                     output.finished_reason.value if output.finished_reason else "stop"
                 )
-                choice = CompletionChoice(
-                    text=output.full_text,
+                choice = ChatCompletionChoice(
+                    message=ChatCompletionMessage(
+                        role="assistant", content=output.full_text
+                    ),
                     index=0,
                     finish_reason=finish_reason,
                 )
-                return CompletionResponse(
+                return ChatCompletionResponse(
                     id=request_id,
                     object="chat.completion",
                     created=int(arrival_time),
@@ -209,12 +219,15 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                         finish_reason = (
                             output.finished_reason.value if output.finished else None
                         )
-                        choice = CompletionChoice(
-                            text=output.delta_text,
+                        # OpenAI uses 'delta' with 'content' for chunks
+                        choice = ChatCompletionChoice(
+                            delta=ChatCompletionMessage(
+                                role="assistant", content=output.delta_text
+                            ),
                             index=0,
                             finish_reason=finish_reason,
                         )
-                        response = CompletionResponse(
+                        response = ChatCompletionResponse(
                             id=request_id,
                             object="chat.completion.chunk",
                             created=int(arrival_time),
