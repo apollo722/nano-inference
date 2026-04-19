@@ -60,52 +60,6 @@ class SchedulerBase(ABC):
         ...
 
 
-class SimpleScheduler(SchedulerBase):
-    """Simple FIFO scheduler - batches all available tasks (one per step for Phase 2)."""
-
-    def __init__(self):
-        super().__init__()
-        self._waiting: deque[GenerateQuery] = deque()
-        self._running: Set[str] = set()
-
-    def add_tasks(self, queries: List[GenerateQuery]) -> None:
-        with self._lock:
-            for query in queries:
-                self._waiting.append(query)
-
-    def schedule(self) -> List[GenerateQuery]:
-        with self._lock:
-            if not self._waiting:
-                return []
-            # Phase 2: one query at a time (we'll upgrade to real batching later)
-            query = self._waiting.popleft()
-            self._running.add(query.request_id)
-            return [query]
-
-    def finish_tasks(self, request_ids: List[str]) -> None:
-        with self._lock:
-            for request_id in request_ids:
-                self._running.discard(request_id)
-
-    def abort_tasks(self, request_ids: Set[str]) -> None:
-        with self._lock:
-            if not request_ids:
-                # If empty set, clear EVERYTHING
-                self._waiting.clear()
-                self._running.clear()
-                return
-
-            self._waiting = deque(
-                q for q in self._waiting if q.request_id not in request_ids
-            )
-            for request_id in request_ids:
-                self._running.discard(request_id)
-
-    def get_workload(self) -> int:
-        with self._lock:
-            return len(self._waiting) + len(self._running)
-
-
 class OrcaScheduler(SchedulerBase):
     """Orca-style continuous batching scheduler.
 
@@ -144,14 +98,22 @@ class OrcaScheduler(SchedulerBase):
             while self._decode_waiting and len(batch) < self.config.max_batch_size:
                 query = self._decode_waiting.popleft()
 
-                # Check if KV block needs extension for the next token
+                # Ensure KV block has space for at least 1 more token
                 if self.allocator:
                     try:
-                        self.allocator.allocate_token(query.kv_cache_block)
-                    except RuntimeError:
-                        # Out of memory for this request. Defer it.
+                        # Ensure we have enough blocks for history + 1 new token
+                        safety_count = 0
+                        while query.kv_cache_block.free_slots < 1:
+                            self.allocator.allocate_token(query.kv_cache_block)
+                            safety_count += 1
+                            if safety_count > 100:
+                                raise RuntimeError(
+                                    f"Infinite loop in decode allocation for {query.request_id}"
+                                )
+                    except RuntimeError as e:
+                        # Out of memory or infinite loop. Defer it.
                         logger.warning(
-                            f"[Scheduler] Deferring decode for {query.request_id}: OOM"
+                            f"[Scheduler] Deferring decode for {query.request_id}: {e}"
                         )
                         self._decode_waiting.append(query)
                         continue
@@ -160,7 +122,6 @@ class OrcaScheduler(SchedulerBase):
                 batch.append(query)
 
             # 2. Then, if there is still room, add prefill requests (increase throughput)
-            # Limit number of new prefill requests to protect decode latency
             prefill_added = 0
             while (
                 self._prefill_waiting
@@ -173,12 +134,24 @@ class OrcaScheduler(SchedulerBase):
                 if self.allocator:
                     prompt_len = len(query.generation_inputs.prompt_token_ids)
                     try:
-                        # Allocate for prompt + 1 (for first decode)
-                        query.kv_cache_block = self.allocator.allocate(prompt_len + 1)
-                    except RuntimeError:
-                        # Out of memory for a NEW request. Put it back and stop prefilling.
+                        # Allocate initial set (often just 1 block)
+                        # Then loop to ensure we cover the entire prompt + 1 decode
+                        if query.kv_cache_block is None:
+                            query.kv_cache_block = self.allocator.allocate(1)
+
+                        safety_count = 0
+                        while query.kv_cache_block.capacity < (prompt_len + 1):
+                            self.allocator.allocate_token(query.kv_cache_block)
+                            safety_count += 1
+                            if safety_count > 1000:
+                                raise RuntimeError(
+                                    f"Infinite loop in prefill allocation for {query.request_id}"
+                                )
+
+                    except RuntimeError as e:
+                        # Out of memory or infinite loop. Put it back and stop prefilling.
                         logger.warning(
-                            f"[Scheduler] Delaying prefill for {query.request_id}: OOM"
+                            f"[Scheduler] Delaying prefill for {query.request_id}: {e}"
                         )
                         self._prefill_waiting.appendleft(query)
                         break
@@ -241,3 +214,9 @@ class OrcaScheduler(SchedulerBase):
                 + len(self._decode_waiting)
                 + len(self._running)
             )
+
+
+class SimpleScheduler(OrcaScheduler):
+    """Alias for OrcaScheduler to maintain compatibility while ensuring KV-awareness."""
+
+    pass

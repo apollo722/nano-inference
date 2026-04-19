@@ -42,20 +42,20 @@ def test_context_builder_builds_padded_batch():
     assert context.request_ids == ["q1", "q2"]
 
     # Check Context Lens
-    assert torch.equal(context.context_lens, torch.tensor([3, 5]))
+    assert torch.equal(context.metadata.context_lens, torch.tensor([3, 5]))
 
     # Check Block Tables (padded to max_blocks=2)
     expected_bt = torch.tensor([[101, 0], [102, 103]], dtype=torch.int32)
-    assert torch.equal(context.kv_block_tables, expected_bt)
+    assert torch.equal(context.metadata.kv_block_tables, expected_bt)
 
     # Check Slot Mapping
     # q1: tokens at 0,1,2 map to block 101, offsets 0,1,2 -> indices 101*4 + 0,1,2 = 404, 405, 406
     # q2: tokens at 0,1,2,3 map to block 102 (offsets 0,1,2,3), token 4 maps to block 103 (offset 0)
     # indices: 408, 409, 410, 411, 412
-    assert context.slot_mapping[0, 0] == 404
-    assert context.slot_mapping[0, 2] == 406
-    assert context.slot_mapping[1, 0] == 408
-    assert context.slot_mapping[1, 4] == 412
+    assert context.metadata.slot_mapping[0, 0] == 404
+    assert context.metadata.slot_mapping[0, 2] == 406
+    assert context.metadata.slot_mapping[1, 0] == 408
+    assert context.metadata.slot_mapping[1, 4] == 412
 
 
 ...
@@ -81,7 +81,7 @@ def test_context_builder_decode_step():
     assert context.input_ids.shape == (1, 1)
     assert context.input_ids[0, 0] == 4
     assert context.position_ids[0, 0] == 3
-    assert context.context_lens[0] == 4
+    assert context.metadata.context_lens[0] == 4
 
     # Slot mapping for token at pos 3: block 101, offset 3 -> 101*16 + 3 = 1619
-    assert context.slot_mapping[0, 0] == 1619
+    assert context.metadata.slot_mapping[0, 0] == 1619

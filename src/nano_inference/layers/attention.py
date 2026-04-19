@@ -194,9 +194,17 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         return self.o_proj(attn_out)
 
 
+from nano_inference.core.context import AttentionMetadata
+
+...
+
+
 class PagedCausalSelfAttention(NaiveCausalSelfAttention):
     """
     Paged Attention layer.
+
+    Instead of recomputing full history or using a contiguous KV cache,
+    this layer reads from and writes to a paged block-based storage.
     """
 
     def forward(
@@ -204,13 +212,25 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
         x: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        kv_block_tables: Optional[torch.Tensor] = None,
-        slot_mapping: Optional[torch.Tensor] = None,
-        context_lens: Optional[torch.Tensor] = None,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
+        metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
+        """
+        Input Shapes:
+            x: (batch, seq_step, hidden_size)
+            position_ids: (batch, seq_step)
+            attention_mask: (batch, seq_total)
+            metadata: Contains block_tables, slot_mapping, context_lens, and caches.
+        """
+        if metadata is None:
+            # Fallback to naive if metadata is not provided
+            return super().forward(x, position_ids, attention_mask)
+
         batch_size, seq_step, _ = x.shape
+        k_cache = metadata.k_cache
+        v_cache = metadata.v_cache
+        slot_mapping = metadata.slot_mapping
+        kv_block_tables = metadata.kv_block_tables
+        context_lens = metadata.context_lens
 
         # 1. Project to Q, K, V
         q = self.q_proj(x).view(batch_size, seq_step, self.num_heads, self.head_dim)
@@ -245,39 +265,53 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
             and context_lens is not None
         ):
             max_context_len = context_lens.max().item()
+            num_kv_heads = self.num_kv_heads
+            head_dim = self.head_dim
+            block_size = k_cache.shape[2]
 
-            k_contig = torch.zeros(
-                (batch_size, max_context_len, self.num_kv_heads, self.head_dim),
-                dtype=x.dtype,
-                device=x.device,
+            # Vectorized Gather
+            # 1. Build a (batch, max_context_len) index tensor of physical slot indices
+            # Each entry is physical_block_id * block_size + block_offset
+
+            # [B, max_context_len]
+            token_indices = (
+                torch.arange(max_context_len, device=x.device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
             )
-            v_contig = torch.zeros(
-                (batch_size, max_context_len, self.num_kv_heads, self.head_dim),
-                dtype=x.dtype,
-                device=x.device,
+            # [B, max_context_len]
+            block_indices = token_indices // block_size
+            # [B, max_context_len]
+            block_offsets = token_indices % block_size
+
+            # Map logical block index to physical block ID using kv_block_tables [B, max_blocks]
+            # [B, max_context_len]
+            physical_block_ids = torch.gather(kv_block_tables.long(), 1, block_indices)
+
+            # Final physical slot indices: [B, max_context_len]
+            flat_indices = (physical_block_ids * block_size + block_offsets).view(-1)
+
+            # 2. Gather from flattened cache
+            # k_cache is [num_blocks, num_kv_heads, block_size, head_dim]
+            # Flatten to [total_slots, num_kv_heads, head_dim]
+            k_cache_flat = k_cache.view(-1, num_kv_heads, head_dim)
+            v_cache_flat = v_cache.view(-1, num_kv_heads, head_dim)
+
+            # Gather: [B * max_context_len, num_kv_heads, head_dim]
+            k_contig = k_cache_flat[flat_indices].view(
+                batch_size, max_context_len, num_kv_heads, head_dim
+            )
+            v_contig = v_cache_flat[flat_indices].view(
+                batch_size, max_context_len, num_kv_heads, head_dim
             )
 
-            for i in range(batch_size):
-                curr_len = context_lens[i].item()
-                b_ids = kv_block_tables[i]
-
-                for token_idx in range(curr_len):
-                    block_idx = token_idx // block_size
-                    block_offset = token_idx % block_size
-                    physical_block_id = b_ids[block_idx].item()
-
-                    k_contig[i, token_idx] = k_cache[
-                        physical_block_id, :, block_offset, :
-                    ]
-                    v_contig[i, token_idx] = v_cache[
-                        physical_block_id, :, block_offset, :
-                    ]
-
+            # GQA: Repeat heads if necessary
             if self.num_kv_heads != self.num_heads:
                 num_repeats = self.num_heads // self.num_kv_heads
                 k_contig = k_contig.repeat_interleave(num_repeats, dim=2)
                 v_contig = v_contig.repeat_interleave(num_repeats, dim=2)
 
+            # Transpose for attention: [B, H, S, D]
             k_contig = k_contig.transpose(1, 2)
             v_contig = v_contig.transpose(1, 2)
             q = q.transpose(1, 2)

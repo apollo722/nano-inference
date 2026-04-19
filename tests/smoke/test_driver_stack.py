@@ -2,21 +2,31 @@ import asyncio
 import time
 
 import pytest
-from nano_inference.core.config import ModelConfig, RuntimeConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig, SchedulerConfig
 from nano_inference.core.request import GenerationInputs, Request
 from nano_inference.core.sampling import SamplingParams
-from nano_inference.driver.driver import SyncDriver
+from nano_inference.driver.driver import AsyncDriver, SyncDriver
 from nano_inference.engine.engine import SingleWorkerEngine
 from nano_inference.input_processor import ChatTemplateInputProcessor
+from nano_inference.scheduler.scheduler import OrcaScheduler
 
 from tests.utils import ensure_test_model_downloaded
 
 
 def _make_driver(model_path: str) -> SyncDriver:
     model_config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
+    runtime_config = RuntimeConfig(model=model_config)
     engine = SingleWorkerEngine(inferencer_type="torch", model_config=model_config)
+
+    # Initialize cache via engine
+    engine.init_cache(runtime_config)
+    allocator = engine.worker.allocator
+
+    scheduler = OrcaScheduler(runtime_config.scheduler, allocator=allocator)
     input_processor = ChatTemplateInputProcessor(engine.worker.inferencer.tokenizer)
-    return SyncDriver(engine=engine, input_processor=input_processor)
+    return SyncDriver(
+        engine=engine, scheduler=scheduler, input_processor=input_processor
+    )
 
 
 def _build_request(tokenizer, prompt: str, request_id: str = "smoke-driver") -> Request:
@@ -37,7 +47,7 @@ def test_driver_stack_generates_4_tokens():
     driver = _make_driver(model_path)
 
     # Access tokenizer through the stack for building the request
-    tokenizer = driver.engine.worker.inferencer.tokenizer
+    tokenizer = driver.async_driver.engine.worker.inferencer.tokenizer
 
     request = _build_request(tokenizer, "Count: one, two, three,")
     output = driver.generate(request)
@@ -53,8 +63,8 @@ def test_driver_output_matches_direct_inferencer():
     model_path = ensure_test_model_downloaded("Qwen/Qwen3-0.6B")
     driver = _make_driver(model_path)
 
-    tokenizer = driver.engine.worker.inferencer.tokenizer
-    inferencer = driver.engine.worker.inferencer
+    tokenizer = driver.async_driver.engine.worker.inferencer.tokenizer
+    inferencer = driver.async_driver.engine.worker.inferencer
 
     prompt = "Count: one, two, three,"
     request = _build_request(tokenizer, prompt)
@@ -75,16 +85,16 @@ def test_driver_output_matches_direct_inferencer():
 @pytest.mark.asyncio
 async def test_orca_batching_concurrent():
     """Verify that OrcaScheduler correctly batches multiple concurrent requests."""
-    from nano_inference.core.config import SchedulerConfig
-    from nano_inference.driver.driver import AsyncDriver
-    from nano_inference.scheduler.scheduler import OrcaScheduler
-
     model_path = ensure_test_model_downloaded("Qwen/Qwen3-0.6B")
     model_config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
     scheduler_config = SchedulerConfig(max_batch_size=4, max_prefill_batch_size=4)
+    runtime_config = RuntimeConfig(model=model_config, scheduler=scheduler_config)
 
     engine = SingleWorkerEngine(inferencer_type="torch", model_config=model_config)
-    scheduler = OrcaScheduler(config=scheduler_config)
+    engine.init_cache(runtime_config)
+    allocator = engine.worker.allocator
+
+    scheduler = OrcaScheduler(config=scheduler_config, allocator=allocator)
     tokenizer = engine.worker.inferencer.tokenizer
     input_processor = ChatTemplateInputProcessor(tokenizer)
     driver = AsyncDriver(

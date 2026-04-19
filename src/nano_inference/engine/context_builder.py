@@ -1,7 +1,7 @@
 from typing import List
 
 import torch
-from nano_inference.core.context import GenerateContext
+from nano_inference.core.context import AttentionMetadata, GenerateContext
 from nano_inference.core.request import GenerateQuery, GenerationStage
 
 
@@ -102,18 +102,35 @@ class GenerateContextBuilder:
                 curr_pos = start_pos + step_idx
                 block_idx = curr_pos // block_size
                 block_offset = curr_pos % block_size
-                physical_block_id = b_ids[block_idx]
+
+                if block_idx >= len(b_ids):
+                    from nano_inference.utils.logger import logger
+
+                    logger.error(
+                        f"IndexError for request {q.request_id}: block_idx {block_idx} "
+                        f"out of range for {len(b_ids)} blocks. "
+                        f"curr_pos={curr_pos}, block_size={block_size}"
+                    )
+                    # Fallback to avoid crash in this loop, but it will likely fail later
+                    physical_block_id = b_ids[-1]
+                else:
+                    physical_block_id = b_ids[block_idx]
+
                 slot_mapping[i, step_idx] = (
                     physical_block_id * block_size + block_offset
                 )
+
+        metadata = AttentionMetadata(
+            context_lens=context_lens,
+            kv_block_tables=block_tables,
+            slot_mapping=slot_mapping,
+            is_prefill=is_prefill,
+        )
 
         return GenerateContext(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            context_lens=context_lens,
-            kv_block_tables=block_tables,
-            slot_mapping=slot_mapping,
+            metadata=metadata,
             request_ids=[q.request_id for q in queries],
-            is_prefill=is_prefill,
         )

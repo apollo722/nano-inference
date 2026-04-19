@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from nano_inference.core.config import ModelConfig
+from nano_inference.core.context import AttentionMetadata
 from nano_inference.layers import (
     NaiveLogitsProcessor,
     NaiveRMSNorm,
@@ -64,21 +65,13 @@ class Qwen3DecoderBlock(nn.Module):
         x: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        kv_block_tables: Optional[torch.Tensor] = None,
-        slot_mapping: Optional[torch.Tensor] = None,
-        context_lens: Optional[torch.Tensor] = None,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
+        metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         attn_out = self.self_attn(
             self.input_norm(x),
             position_ids=position_ids,
             attention_mask=attention_mask,
-            kv_block_tables=kv_block_tables,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            k_cache=k_cache,
-            v_cache=v_cache,
+            metadata=metadata,
         )
         x = x + attn_out
 
@@ -105,11 +98,7 @@ class Qwen3TransformerModel(nn.Module):
         input_ids: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        kv_block_tables: Optional[torch.Tensor] = None,
-        slot_mapping: Optional[torch.Tensor] = None,
-        context_lens: Optional[torch.Tensor] = None,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
+        metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
 
@@ -123,11 +112,7 @@ class Qwen3TransformerModel(nn.Module):
                 x,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
-                kv_block_tables=kv_block_tables,
-                slot_mapping=slot_mapping,
-                context_lens=context_lens,
-                k_cache=k_cache,
-                v_cache=v_cache,
+                metadata=metadata,
             )
 
         return self.norm(x)
@@ -149,21 +134,13 @@ class Qwen3ForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        kv_block_tables: Optional[torch.Tensor] = None,
-        slot_mapping: Optional[torch.Tensor] = None,
-        context_lens: Optional[torch.Tensor] = None,
-        k_cache: Optional[torch.Tensor] = None,
-        v_cache: Optional[torch.Tensor] = None,
+        metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
             attention_mask=attention_mask,
-            kv_block_tables=kv_block_tables,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            k_cache=k_cache,
-            v_cache=v_cache,
+            metadata=metadata,
         )
 
         return self.logits_processor(

@@ -25,6 +25,11 @@ class EngineBase(ABC):
         """Run a single inference step for a batch of queries."""
         ...
 
+    @abstractmethod
+    def init_cache(self, config: RuntimeConfig) -> None:
+        """Initialize the KV cache (e.g. after model load)."""
+        ...
+
 
 class SingleWorkerEngine(EngineBase):
     """Engine backed by a single Worker on one device.
@@ -45,3 +50,6 @@ class SingleWorkerEngine(EngineBase):
 
     def step(self, queries: List[GenerateQuery]) -> List[int]:
         return self.worker.step(queries)
+
+    def init_cache(self, config: RuntimeConfig) -> None:
+        self.worker.init_cache(config)

@@ -41,18 +41,25 @@ class DriverBase(ABC):
 class SyncDriver(DriverBase):
     """Synchronous driver: blocks until generation is complete.
 
-    Converts Request -> GenerateQuery at the boundary, then delegates to Engine.
-    Phase 2: Updated to use engine.generate() for monolithic compatibility.
+    Phase 3: Now uses the AsyncDriver infrastructure internally to ensure
+    consistent KV block allocation and paged attention.
     """
 
-    def __init__(self, engine: EngineBase, input_processor: Any):
-        self.engine = engine
-        self.input_processor = input_processor
+    def __init__(
+        self,
+        engine: EngineBase,
+        scheduler: SchedulerBase,
+        input_processor: Any,
+        config: SchedulerConfig = None,
+    ):
+        self.async_driver = AsyncDriver(engine, scheduler, input_processor, config)
 
     def generate(self, request: Request) -> GenerateOutput:
-        query = GenerateQuery.from_request(request)
-        outputs = self.engine.generate([query])
-        return outputs[0]
+        self.async_driver.start()
+        try:
+            return self.async_driver.generate(request)
+        finally:
+            self.async_driver.stop()
 
 
 class AsyncDriver(DriverBase):
@@ -197,11 +204,13 @@ class AsyncDriver(DriverBase):
         step_count = 0
         while True:
             try:
+                # 1. Check if we should keep running (minimal lock duration)
                 with self._lock:
                     if not self._running:
                         logger.info("AsyncDriver loop stopping flag detected.")
                         break
 
+                # 2. Schedule and execute (NO LOCK HELD)
                 queries = self.scheduler.schedule()
                 if not queries:
                     time.sleep(0.001)

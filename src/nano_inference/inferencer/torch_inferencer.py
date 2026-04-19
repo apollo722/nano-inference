@@ -5,7 +5,12 @@ from typing import List, Optional, Union
 import torch
 from nano_inference.core.config import ModelConfig
 from nano_inference.core.context import GenerateContext
-from nano_inference.core.request import FinishedReason, GenerateOutput, Request
+from nano_inference.core.request import (
+    FinishedReason,
+    GenerateOutput,
+    GenerationStage,
+    Request,
+)
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.inferencer.base import InferencerBase
 from nano_inference.inferencer.factory import register_inferencer
@@ -137,7 +142,10 @@ class TorchInferencer(InferencerBase):
                 + request.sampling_params.max_new_tokens
             )
 
-            for _ in range(request.sampling_params.max_new_tokens):
+            for step_idx in range(request.sampling_params.max_new_tokens):
+                logger.debug(
+                    f"[TorchInferencer] Standalone generate step {step_idx}..."
+                )
                 context = builder.build([query])
                 next_tokens = self.step(
                     context,
@@ -150,7 +158,12 @@ class TorchInferencer(InferencerBase):
                 query.output_token_ids.append(next_token_id)
                 new_token_ids.append(next_token_id)
 
+                # Transition to DECODE stage after the first step
+                if query.stage == GenerationStage.PREFILL:
+                    query.stage = GenerationStage.DECODE
+
                 if self._is_eos_token(next_token_id, request.eos_token_id):
+                    logger.debug(f"[TorchInferencer] EOS detected at step {step_idx}")
                     allocator.free(query.kv_cache_block)
                     return GenerateOutput(
                         output_token_ids=new_token_ids,
@@ -159,6 +172,7 @@ class TorchInferencer(InferencerBase):
                         full_text=self.tokenizer.decode(new_token_ids),
                     )
 
+            logger.debug("[TorchInferencer] Max tokens reached.")
             full_text = self.tokenizer.decode(new_token_ids)
             allocator.free(query.kv_cache_block)
 
@@ -183,16 +197,16 @@ class TorchInferencer(InferencerBase):
         if self.model is None or self.device is None:
             raise RuntimeError("Model is not loaded. Call load_model() first.")
 
+        # Pass physical KV tensors to the model via metadata
+        context.metadata.k_cache = k_cache
+        context.metadata.v_cache = v_cache
+
         with torch.inference_mode():
             logits = self.model(
                 input_ids=context.input_ids,
                 attention_mask=context.attention_mask,
                 position_ids=context.position_ids,
-                kv_block_tables=context.kv_block_tables,
-                slot_mapping=context.slot_mapping,
-                context_lens=context.context_lens,
-                k_cache=k_cache,
-                v_cache=v_cache,
+                metadata=context.metadata,
             )
 
             # Extract last token logits for every query in the batch

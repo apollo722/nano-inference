@@ -44,37 +44,13 @@ class AppState:
         self.input_processor = ChatTemplateInputProcessor(self.tokenizer)
         self.engine = SingleWorkerEngine(inferencer_type, config.model)
 
-        # Initialize KV Cache Allocator
-        # We extract model metadata from the loaded model for correct cache sizing.
-        # (Assuming single worker/inferencer for Phase 3)
-        model = self.engine.worker.inferencer.model
-        if model is not None:
-            num_kv_heads = (
-                getattr(model.config, "num_kv_heads", None) or model.config.num_heads
-            )
-            head_dim = getattr(model.config, "head_dim", None) or (
-                model.config.hidden_size // model.config.num_heads
-            )
-            dtype = next(model.parameters()).dtype
-        else:
-            # Baseline HF might not expose model directly easily, use defaults
-            num_kv_heads = 16
-            head_dim = 128
-            dtype = torch.float32
+        # Trigger dynamic memory profiling and cache initialization
+        self.engine.init_cache(config)
 
-        # Phase 3: Simple fixed block count for now (e.g. 1024)
-        num_blocks = 1024
-
-        self.allocator = PagedKVCacheAllocator(
-            num_blocks=num_blocks,
-            block_size=config.kv_cache.block_size,
-            num_heads=num_kv_heads,
-            head_dim=head_dim,
-            dtype=dtype,
-            device=config.model.device,
-        )
-
+        # Pull the dynamically created allocator into the scheduler
+        self.allocator = self.engine.worker.allocator
         self.scheduler = OrcaScheduler(config.scheduler, allocator=self.allocator)
+
         self.driver = AsyncDriver(
             self.engine, self.scheduler, self.input_processor, config.scheduler
         )

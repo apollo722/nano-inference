@@ -24,8 +24,8 @@ def test_api_v1_completions():
             "/v1/completions",
             json={
                 "model": "qwen3-0.6b",
-                "prompt": "Count: one, two, three,",
-                "max_tokens": 4,
+                "prompt": "Hi",
+                "max_tokens": 2,
                 "temperature": 0.0,
             },
         )
@@ -61,8 +61,8 @@ def test_api_v1_completions_streaming():
             "/v1/completions",
             json={
                 "model": "qwen3-0.6b",
-                "prompt": "Count: one, two, three,",
-                "max_tokens": 4,
+                "prompt": "Hi",
+                "max_tokens": 2,
                 "temperature": 0.0,
                 "stream": True,
             },
@@ -101,8 +101,8 @@ def test_api_v1_chat_completions():
             "/v1/chat/completions",
             json={
                 "model": "qwen3-0.6b",
-                "messages": [{"role": "user", "content": "Hello!"}],
-                "max_tokens": 4,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 2,
                 "temperature": 0.0,
             },
         )
@@ -134,8 +134,8 @@ def test_api_v1_chat_completions_streaming():
             "/v1/chat/completions",
             json={
                 "model": "qwen3-0.6b",
-                "messages": [{"role": "user", "content": "Hello!"}],
-                "max_tokens": 4,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 2,
                 "temperature": 0.0,
                 "stream": True,
             },

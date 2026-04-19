@@ -53,6 +53,8 @@ class KVCacheConfig(BaseConfig):
     block_size: int = 16
     gpu_memory_utilization: float = 0.9
     swap_space: int = 4  # GB
+    num_blocks_cpu: int = 128  # Default for CPU/Testing
+    num_blocks_gpu: Optional[int] = None  # Optional override for profiling
 
 
 @dataclass

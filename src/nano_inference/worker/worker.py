@@ -2,11 +2,12 @@ from abc import ABC, abstractmethod
 from typing import List
 
 import torch
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig
 from nano_inference.core.request import GenerateOutput, GenerateQuery
 from nano_inference.engine.context_builder import GenerateContextBuilder
 from nano_inference.inferencer.factory import InferencerFactory
 from nano_inference.kv_cache import PagedKVCacheAllocator
+from nano_inference.utils.logger import logger
 
 
 class WorkerBase(ABC):
@@ -44,6 +45,69 @@ class Worker(WorkerBase):
         self.device = torch.device(model_config.device)
         self.context_builder = GenerateContextBuilder(self.device)
         self.allocator = allocator
+
+    def init_cache(self, config: RuntimeConfig) -> None:
+        """Initialize the KV cache allocator with dynamic profiling."""
+        if self.allocator is not None:
+            return
+
+        model = self.inferencer.model
+        num_kv_heads = (
+            getattr(model.config, "num_kv_heads", None) or model.config.num_heads
+        )
+        head_dim = getattr(model.config, "head_dim", None) or (
+            model.config.hidden_size // model.config.num_heads
+        )
+
+        num_blocks = self.profile_num_blocks(
+            config, num_kv_heads, head_dim, next(model.parameters()).dtype
+        )
+
+        self.allocator = PagedKVCacheAllocator(
+            num_blocks=num_blocks,
+            block_size=config.kv_cache.block_size,
+            num_heads=num_kv_heads,
+            head_dim=head_dim,
+            dtype=next(model.parameters()).dtype,
+            device=str(self.device),
+        )
+        logger.info(f"[Worker] Initialized PagedKVCache with {num_blocks} blocks.")
+
+    def profile_num_blocks(
+        self,
+        config: RuntimeConfig,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+    ) -> int:
+        """Calculate the number of blocks that can fit in memory."""
+        if config.kv_cache.num_blocks_gpu is not None and self.device.type == "cuda":
+            return config.kv_cache.num_blocks_gpu
+
+        if self.device.type == "cpu":
+            return config.kv_cache.num_blocks_cpu
+
+        # GPU Profiling
+        torch.cuda.empty_cache()
+        total_mem, free_mem = torch.cuda.mem_get_info(self.device)
+
+        # Available memory for KV cache
+        kv_mem_limit = free_mem * config.kv_cache.gpu_memory_utilization
+
+        # Size of one block (K + V) in bytes
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        # 2 for K and V
+        block_size_bytes = (
+            2 * num_kv_heads * config.kv_cache.block_size * head_dim * element_size
+        )
+
+        num_blocks = int(kv_mem_limit // block_size_bytes)
+        if num_blocks <= 0:
+            raise RuntimeError(
+                f"Not enough GPU memory to allocate even one KV block! Needed {block_size_bytes} bytes."
+            )
+
+        return num_blocks
 
     def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
         """Monolithic generation path for baselines or single-request drivers."""

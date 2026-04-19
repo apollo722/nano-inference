@@ -1,14 +1,14 @@
 import time
 
 import pytest
-from nano_inference.core.config import ModelConfig, SchedulerConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig, SchedulerConfig
 from nano_inference.core.request import GenerationInputs, Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.driver.driver import AsyncDriver
 from nano_inference.engine.engine import SingleWorkerEngine
 from nano_inference.inferencer.factory import InferencerFactory
 from nano_inference.input_processor import ChatTemplateInputProcessor
-from nano_inference.scheduler.scheduler import SimpleScheduler
+from nano_inference.scheduler.scheduler import OrcaScheduler
 
 from tests.utils import ensure_test_model_downloaded
 
@@ -28,19 +28,23 @@ def _build_request(inferencer, prompt: str) -> Request:
 @pytest.mark.smoke
 def test_async_driver_generates_4_tokens():
     model_path = ensure_test_model_downloaded("Qwen/Qwen3-0.6B")
-    config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
+    model_config = ModelConfig(model_dir=model_path, device="cpu", dtype="float32")
+    runtime_config = RuntimeConfig(model=model_config)
 
     # Create a dummy inferencer just to get tokenizer for request building
-    dummy_inferencer = InferencerFactory.create("torch", config)
+    dummy_inferencer = InferencerFactory.create("torch", model_config)
 
-    engine = SingleWorkerEngine(inferencer_type="torch", model_config=config)
-    scheduler = SimpleScheduler()
+    engine = SingleWorkerEngine(inferencer_type="torch", model_config=model_config)
+    engine.init_cache(runtime_config)
+    allocator = engine.worker.allocator
+
+    scheduler = OrcaScheduler(config=runtime_config.scheduler, allocator=allocator)
     input_processor = ChatTemplateInputProcessor(dummy_inferencer.tokenizer)
     driver = AsyncDriver(
         engine=engine,
         scheduler=scheduler,
         input_processor=input_processor,
-        config=SchedulerConfig(),
+        config=runtime_config.scheduler,
     )
 
     driver.start()
