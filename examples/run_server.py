@@ -40,7 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
+        default="configs/default.yaml",
         help="Path to a YAML configuration file.",
+    )
+    parser.add_argument(
+        "--max-prefill-batch-size",
+        type=int,
+        help="Maximum number of requests to prefill in one batch.",
     )
     return parser
 
