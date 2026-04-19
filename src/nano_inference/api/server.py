@@ -262,6 +262,14 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
             logger.error(f"[API] Fatal error in chat_completions: {e}", exc_info=True)
             raise
 
+    @app.get("/metrics")
+    async def metrics():
+        """Expose scheduler and KV cache metrics."""
+        state = app.state.state
+        if state is None:
+            return {"error": "Application state not initialized"}
+        return state.scheduler.get_stats()
+
     return app
 
 
