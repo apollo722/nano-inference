@@ -48,6 +48,7 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.pytest.ini_options]
+norecursedirs = ["reference"]
 markers = [
     "smoke: marks tests as smoke tests (quick end-to-end sanity checks)",
 ]
