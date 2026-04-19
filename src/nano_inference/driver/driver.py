@@ -94,17 +94,20 @@ class AsyncDriver(DriverBase):
         """Blocking API (for backward compatibility). Assert not in event loop."""
         try:
             loop = asyncio.get_running_loop()
-            if loop.is_running():
-                # If we are here, we are in the loop thread. Blocking with .result() will deadlock.
-                raise RuntimeError(
-                    "AsyncDriver.generate() is a blocking call and cannot be used "
-                    "inside a running event loop. Use 'await driver.generate_async(request)' instead."
-                )
-            return asyncio.run(self.generate_async(request))
         except RuntimeError:
-            # No running loop, or explicitly raised above.
-            # If no running loop, we can safely use asyncio.run
+            # No running event loop in this thread, safe to use asyncio.run
             return asyncio.run(self.generate_async(request))
+
+        if loop.is_running():
+            # We are inside a running event loop (e.g. FastAPI thread).
+            # Blocking here with a sync call would deadlock the loop.
+            raise RuntimeError(
+                "AsyncDriver.generate() is a blocking call and cannot be used "
+                "inside a running event loop. Use 'await driver.generate_async(request)' instead."
+            )
+
+        # Loop exists but is not running (rare, but possible in some setups)
+        return asyncio.run(self.generate_async(request))
 
     def add_request(self, request: Request) -> AsyncGenerator[GenerateOutput, None]:
         """Non-blocking API: add request and return an AsyncGenerator of outputs."""
