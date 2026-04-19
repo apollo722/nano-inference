@@ -24,9 +24,22 @@ class OutputProcessor:
                 query.output_text_list = []
 
         for query, token_id in zip(queries, new_token_ids):
-            # 1. Update query state with the new token
+            # 1. Update KV Cache tracking
+            if query.kv_cache_block:
+                if query.stage == GenerationStage.PREFILL:
+                    # In prefill, we just added all prompt tokens
+                    query.kv_cache_block.append_tokens(
+                        len(query.generation_inputs.prompt_token_ids)
+                    )
+                else:
+                    # In decode, we just added one token
+                    query.kv_cache_block.append_tokens(1)
+
+            # 2. Update query state with the new token
             query.output_token_ids.append(token_id)
-            query.computed_length += 1
+            query.computed_length = len(query.generation_inputs.prompt_token_ids) + len(
+                query.output_token_ids
+            )
 
             # 2. Incremental detokenization
             # Decode only the NEW tokens

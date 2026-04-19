@@ -45,6 +45,11 @@ class SchedulerBase(ABC):
         ...
 
     @abstractmethod
+    def on_step_completed(self, request_ids: List[str]) -> None:
+        """Release the 'running' status after an inference step."""
+        ...
+
+    @abstractmethod
     def finish_tasks(self, request_ids: List[str]) -> None:
         """Mark tasks as finished (remove from running set)."""
         ...
@@ -81,18 +86,34 @@ class OrcaScheduler(SchedulerBase):
     def add_tasks(self, queries: List[GenerateQuery]) -> None:
         with self._lock:
             for query in queries:
+                # Add to lookup if new
+                if query.request_id not in self._queries:
+                    self._queries[query.request_id] = query
+
                 logger.debug(
-                    f"[Scheduler] Adding task {query.request_id} (stage={query.stage})"
+                    f"[Scheduler] Adding task {query.request_id} to queue (stage={query.stage}, len={query.computed_length})"
                 )
-                self._queries[query.request_id] = query
-                if query.stage == GenerationStage.PREFILL:
-                    self._prefill_waiting.append(query)
+
+                # Routing logic:
+                # 1. If explicitly in PREFILL stage AND hasn't processed anything yet, it's a prefill.
+                # 2. If it has already processed tokens, it MUST be a decode (rescheduled).
+                # 3. Otherwise, follow the stage (could be a new request starting at DECODE).
+                if (
+                    query.stage == GenerationStage.PREFILL
+                    and query.computed_length == 0
+                ):
+                    if query not in self._prefill_waiting:
+                        self._prefill_waiting.append(query)
                 else:
-                    self._decode_waiting.append(query)
+                    if query not in self._decode_waiting:
+                        self._decode_waiting.append(query)
 
     def schedule(self) -> List[GenerateQuery]:
         with self._lock:
             batch: List[GenerateQuery] = []
+
+            # Temporary list to hold decodes that we couldn't schedule this time
+            skipped_decodes = []
 
             # 1. First, fill with decode requests (prioritize latency)
             while self._decode_waiting and len(batch) < self.config.max_batch_size:
@@ -100,28 +121,36 @@ class OrcaScheduler(SchedulerBase):
 
                 # Ensure KV block has space for at least 1 more token
                 if self.allocator:
+                    if query.kv_cache_block is None:
+                        logger.warning(
+                            f"[Scheduler] req {query.request_id} has no KV block in decode stage. Skipping and finishing."
+                        )
+                        # Don't drop it into the void, finish it properly if it's broken
+                        self._running.add(
+                            query.request_id
+                        )  # mark as running so finish_tasks works
+                        self.finish_tasks([query.request_id])
+                        continue
+
                     try:
                         # Ensure we have enough blocks for history + 1 new token
-                        safety_count = 0
                         while query.kv_cache_block.free_slots < 1:
                             self.allocator.allocate_token(query.kv_cache_block)
-                            safety_count += 1
-                            if safety_count > 100:
-                                raise RuntimeError(
-                                    f"Infinite loop in decode allocation for {query.request_id}"
-                                )
                     except RuntimeError as e:
-                        # Out of memory or infinite loop. Defer it.
                         logger.warning(
                             f"[Scheduler] Deferring decode for {query.request_id}: {e}"
                         )
-                        self._decode_waiting.append(query)
+                        skipped_decodes.append(query)
                         continue
 
                 self._running.add(query.request_id)
                 batch.append(query)
 
-            # 2. Then, if there is still room, add prefill requests (increase throughput)
+            # Put skipped decodes back to the front
+            for q in reversed(skipped_decodes):
+                self._decode_waiting.appendleft(q)
+
+            # 2. Then, if there is still room, add prefill requests (throughput)
             prefill_added = 0
             while (
                 self._prefill_waiting
@@ -134,22 +163,22 @@ class OrcaScheduler(SchedulerBase):
                 if self.allocator:
                     prompt_len = len(query.generation_inputs.prompt_token_ids)
                     try:
-                        # Allocate initial set (often just 1 block)
-                        # Then loop to ensure we cover the entire prompt + 1 decode
                         if query.kv_cache_block is None:
-                            query.kv_cache_block = self.allocator.allocate(1)
-
-                        safety_count = 0
-                        while query.kv_cache_block.capacity < (prompt_len + 1):
-                            self.allocator.allocate_token(query.kv_cache_block)
-                            safety_count += 1
-                            if safety_count > 1000:
-                                raise RuntimeError(
-                                    f"Infinite loop in prefill allocation for {query.request_id}"
+                            query.kv_cache_block = self.allocator.allocate(
+                                prompt_len + 1
+                            )
+                        elif query.kv_cache_block.capacity < (prompt_len + 1):
+                            needed = (prompt_len + 1) - query.kv_cache_block.capacity
+                            num_blocks_needed = math.ceil(
+                                needed / query.kv_cache_block.block_size
+                            )
+                            for _ in range(num_blocks_needed):
+                                if not self.allocator.free_blocks:
+                                    raise RuntimeError("Out of KV cache memory")
+                                query.kv_cache_block.append_block(
+                                    self.allocator.free_blocks.pop()
                                 )
-
                     except RuntimeError as e:
-                        # Out of memory or infinite loop. Put it back and stop prefilling.
                         logger.warning(
                             f"[Scheduler] Delaying prefill for {query.request_id}: {e}"
                         )
@@ -167,17 +196,31 @@ class OrcaScheduler(SchedulerBase):
                 )
             return batch
 
+    def on_step_completed(self, request_ids: List[str]) -> None:
+        with self._lock:
+            for request_id in request_ids:
+                self._running.discard(request_id)
+
     def finish_tasks(self, request_ids: List[str]) -> None:
         with self._lock:
             for request_id in request_ids:
-                if request_id in self._running:
-                    logger.debug(f"[Scheduler] Finishing task {request_id}")
-                    self._running.discard(request_id)
+                logger.info(f"[Scheduler] Cleanup request {request_id}")
+                # 1. Remove from running set
+                self._running.discard(request_id)
 
-                    # Free KV blocks
-                    query = self._queries.pop(request_id, None)
-                    if query and self.allocator:
-                        self.allocator.free(query.kv_cache_block)
+                # 2. Remove from waiting queues (if they were still there due to mixed batch logic or error)
+                self._prefill_waiting = deque(
+                    q for q in self._prefill_waiting if q.request_id != request_id
+                )
+                self._decode_waiting = deque(
+                    q for q in self._decode_waiting if q.request_id != request_id
+                )
+
+                # 3. Free KV blocks and remove from lookup
+                query = self._queries.pop(request_id, None)
+                if query and self.allocator and query.kv_cache_block:
+                    self.allocator.free(query.kv_cache_block)
+                    query.kv_cache_block = None
 
     def abort_tasks(self, request_ids: Set[str]) -> None:
         with self._lock:

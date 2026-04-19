@@ -38,6 +38,11 @@ def scaled_dot_product_attention(
 
     # Apply external attention mask (e.g., for padding or paged context)
     if attention_mask is not None:
+        # attention_mask shape: (B, 1, 1, S_total)
+        # scores shape: (B, H, S_q, S_k)
+        # In mixed batches, S_k for this specific request might be smaller than S_total
+        if attention_mask.shape[-1] > key_len:
+            attention_mask = attention_mask[..., :key_len]
         scores = scores + attention_mask.to(device=scores.device, dtype=scores.dtype)
 
     attn_weights = torch.softmax(scores.float(), dim=-1).to(q.dtype)
@@ -221,7 +226,6 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
         batch_size, seq_step, _ = x.shape
 
         # In multi-layer KV cache, metadata.k_cache has shape [L, num_blocks, H, block_size, D]
-        # We index by self.layer_idx to get this layer's cache.
         assert (
             self.layer_idx is not None
         ), "layer_idx must be set for PagedCausalSelfAttention"
@@ -253,7 +257,7 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
         # 2. RoPE
         q, k = self.rotary(q, k, position_ids)
 
-        # 3. Write Phase (In-place update)
+        # 3. Write Phase (In-place update to physical cache)
         if k_cache is not None and v_cache is not None and slot_mapping is not None:
             block_size = k_cache.shape[2]
             for b in range(batch_size):
@@ -268,6 +272,7 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
 
         # 4. Attention Phase Selection
         if metadata.is_prefill:
+            # PREFILL: Use fresh K/V directly
             k_contig = k
             v_contig = v
         elif (
@@ -275,9 +280,11 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
             and kv_block_tables is not None
             and context_lens is not None
         ):
+            # DECODE: Gather Phase (Reconstruct contiguous K/V from cache)
             max_context_len = context_lens.max().item()
             block_size = k_cache.shape[2]
 
+            # Vectorized gather using physical slot indices
             token_indices = (
                 torch.arange(max_context_len, device=x.device)
                 .unsqueeze(0)
@@ -290,31 +297,34 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
             k_contig = k_cache[physical_block_ids, :, block_offsets, :]
             v_contig = v_cache[physical_block_ids, :, block_offsets, :]
         else:
+            # Fallback if no cache metadata provided
             return super().forward(x, position_ids, attention_mask)
 
-        # 5. GQA Repeat
+        # 5. GQA Repeat (Repeat KV heads to match Q heads if using GQA)
         if self.num_kv_heads != self.num_heads:
             num_repeats = self.num_heads // self.num_kv_heads
             k_contig = k_contig.repeat_interleave(num_repeats, dim=2)
             v_contig = v_contig.repeat_interleave(num_repeats, dim=2)
 
-        # 6. Transpose to [B, H, S, D]
+        # 6. Transpose to [B, H, S, D] for attention kernels
         q = q.transpose(1, 2)
         k_contig = k_contig.transpose(1, 2)
         v_contig = v_contig.transpose(1, 2)
 
-        # 7. Mask handling
+        # 7. Mask handling (Convert boolean mask to additive mask)
         if attention_mask is not None and attention_mask.dim() == 2:
             mask_additive = torch.zeros_like(attention_mask, dtype=x.dtype)
             mask_additive = mask_additive.masked_fill(~attention_mask, float("-inf"))
+            # Expand to [B, 1, 1, S_total]
             attention_mask = mask_additive.view(batch_size, 1, 1, -1)
 
-        # 8. Attention
+        # 8. Attention (Causal mask applies triu only when Q_len == K_len)
+        # For DECODE, Q_len is typically 1 while K_len is the full history.
         attn_out = scaled_dot_product_attention(
             q=q, k=k_contig, v=v_contig, attention_mask=attention_mask, is_causal=True
         )
 
-        # 9. Output projection
+        # 9. Output projection back to model hidden size
         attn_out = (
             attn_out.transpose(1, 2)
             .contiguous()

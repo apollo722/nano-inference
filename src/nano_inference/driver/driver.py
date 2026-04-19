@@ -213,7 +213,7 @@ class AsyncDriver(DriverBase):
                 # 2. Schedule and execute (NO LOCK HELD)
                 queries = self.scheduler.schedule()
                 if not queries:
-                    time.sleep(0.001)
+                    time.sleep(0.01)
                     continue
 
                 step_count += 1
@@ -284,12 +284,14 @@ class AsyncDriver(DriverBase):
                             f"[Driver] Request {query.request_id} FINISHED (reason: {output.finished_reason})"
                         )
                         self.response_manager.complete(query.request_id)
+                        # Phase 3: Explicitly finish in scheduler to free KV blocks
+                        self.scheduler.finish_tasks([query.request_id])
                     else:
                         reschedule_queries.append(query)
 
-                # Always mark tasks as "not running" in the scheduler before rescheduling
-                # to avoid duplicate execution in the same step.
-                self.scheduler.finish_tasks([q.request_id for q in queries])
+                # Always release 'running' status in the scheduler before rescheduling
+                # This doesn't free the KV cache, just allows the task to be scheduled again.
+                self.scheduler.on_step_completed([q.request_id for q in queries])
 
                 if reschedule_queries:
                     logger.debug(
