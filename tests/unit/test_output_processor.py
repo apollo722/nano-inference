@@ -32,7 +32,8 @@ def test_output_processor_appends_token_and_transitions_stage():
 
     assert q.stage == GenerationStage.DECODE
     assert q.output_token_ids == [10]
-    assert q.computed_length == 1
+    # computed_length should be prompt_len (3) + output_len (1) = 4
+    assert q.computed_length == 4
     assert q.delta_text == "text_10"
     assert q.previous_tokens_len == 1
 
