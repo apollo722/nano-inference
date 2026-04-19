@@ -96,7 +96,7 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                     output.finished_reason.value if output.finished_reason else "stop"
                 )
                 choice = CompletionChoice(
-                    text=output.delta_text,  # delta_text IS the generated text for non-streaming
+                    text=output.full_text,  # Use full_text for non-streaming
                     index=0,
                     finish_reason=finish_reason,
                 )
@@ -152,11 +152,89 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
             raise
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Any):
-        # Placeholder: will implement full chat completion logic soon
-        raise HTTPException(
-            status_code=501, detail="Chat completions not yet implemented"
-        )
+    async def chat_completions(
+        request: CompletionRequest,
+    ):
+        state = app.state.state
+        logger.info(f"[API] Received chat completion request. stream={request.stream}")
+
+        try:
+            # Simple conversion for now: prompt -> messages
+            messages = [{"role": "user", "content": request.prompt}]
+            gen_inputs = state.input_processor.encode(
+                messages, add_generation_prompt=True
+            )
+
+            arrival_time = time.time()
+            request_id = f"chatreq-{uuid.uuid4().hex}"
+            internal_request = Request(
+                request_id=request_id,
+                generation_inputs=gen_inputs,
+                sampling_params=SamplingParams(
+                    max_new_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    top_k=request.top_k,
+                ),
+                eos_token_id=state.tokenizer.eos_token_id,
+                arrival_time=arrival_time,
+            )
+
+            if not request.stream:
+                output = await state.driver.generate_async(internal_request)
+                finish_reason = (
+                    output.finished_reason.value if output.finished_reason else "stop"
+                )
+                choice = CompletionChoice(
+                    text=output.full_text,
+                    index=0,
+                    finish_reason=finish_reason,
+                )
+                return CompletionResponse(
+                    id=request_id,
+                    object="chat.completion",
+                    created=int(arrival_time),
+                    model=request.model,
+                    choices=[choice],
+                    usage=None,
+                )
+
+            # Streaming chat response
+            async def chat_stream_generator():
+                try:
+                    async for output in state.driver.add_request(internal_request):
+                        if not output.delta_text and not output.finished:
+                            continue
+
+                        finish_reason = (
+                            output.finished_reason.value if output.finished else None
+                        )
+                        choice = CompletionChoice(
+                            text=output.delta_text,
+                            index=0,
+                            finish_reason=finish_reason,
+                        )
+                        response = CompletionResponse(
+                            id=request_id,
+                            object="chat.completion.chunk",
+                            created=int(arrival_time),
+                            model=request.model,
+                            choices=[choice],
+                            usage=None,
+                        )
+                        yield f"data: {json.dumps(response.model_dump())}\n\n"
+                finally:
+                    pass
+
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                chat_stream_generator(), media_type="text/event-stream"
+            )
+
+        except Exception as e:
+            logger.error(f"[API] Fatal error in chat_completions: {e}", exc_info=True)
+            raise
 
     return app
 

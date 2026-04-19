@@ -41,25 +41,18 @@ class DriverBase(ABC):
 class SyncDriver(DriverBase):
     """Synchronous driver: blocks until generation is complete.
 
-    Phase 2: Updated to use the canonical engine.step() path in a loop.
+    Converts Request -> GenerateQuery at the boundary, then delegates to Engine.
+    Phase 2: Updated to use engine.generate() for monolithic compatibility.
     """
 
     def __init__(self, engine: EngineBase, input_processor: Any):
         self.engine = engine
-        self.output_processor = OutputProcessor(input_processor)
+        self.input_processor = input_processor
 
     def generate(self, request: Request) -> GenerateOutput:
         query = GenerateQuery.from_request(request)
-
-        while query.stage != GenerationStage.FINISHED:
-            new_token_ids = self.engine.step([query])
-            self.output_processor.process_step_outputs([query], new_token_ids)
-
-        return GenerateOutput(
-            output_token_ids=query.output_token_ids,
-            finished=True,
-            finished_reason=getattr(query, "finished_reason", None),
-        )
+        outputs = self.engine.generate([query])
+        return outputs[0]
 
 
 class AsyncDriver(DriverBase):

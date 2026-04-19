@@ -16,6 +16,11 @@ class WorkerBase(ABC):
     """
 
     @abstractmethod
+    def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
+        """Run full generation for a batch of queries."""
+        ...
+
+    @abstractmethod
     def step(self, queries: List[GenerateQuery]) -> List[int]:
         """Run a single inference step for a batch of queries."""
         ...
@@ -32,6 +37,22 @@ class Worker(WorkerBase):
         self.inferencer = InferencerFactory.create(inferencer_type, model_config)
         self.device = torch.device(model_config.device)
         self.context_builder = GenerateContextBuilder(self.device)
+
+    def generate(self, queries: List[GenerateQuery]) -> List[GenerateOutput]:
+        """Monolithic generation path for baselines or single-request drivers."""
+        from nano_inference.core.request import Request
+
+        requests = [
+            Request(
+                request_id=q.request_id,
+                generation_inputs=q.generation_inputs,
+                sampling_params=q.sampling_params,
+                eos_token_id=q.eos_token_id,
+                arrival_time=q.arrival_time,
+            )
+            for q in queries
+        ]
+        return self.inferencer.generate_batch(requests)
 
     def step(self, queries: List[GenerateQuery]) -> List[int]:
         context = self.context_builder.build(queries)
