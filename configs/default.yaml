@@ -6,7 +6,7 @@ model:
 
 scheduler:
   max_batch_size: 32
-  max_prefill_batch_size: 1
+  max_prefill_batch_size: 4
   max_num_requests: 100
   request_timeout: 300.0
 

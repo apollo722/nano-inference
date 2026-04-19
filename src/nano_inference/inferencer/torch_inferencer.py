@@ -224,19 +224,10 @@ class TorchInferencer(InferencerBase):
 
             batched_last_logits = torch.stack(last_logits)
 
-            # Sample next tokens
-            all_generated_ids = []
-            for i in range(batch_size):
-                # Sampler needs the FULL history for repetition penalty
-                # Phase 3: We don't have the history in context.input_ids anymore
-                # so we might need to store it or accept penalty might be wrong for now
-                # until we fix Sampler.
-                # For Step B, we pass an empty list or keep it simple.
-                all_generated_ids.append([])
-
+            # Sample next tokens using full history for repetition penalty
             next_token_ids = self.sampler.select_batch(
                 logits=batched_last_logits,
-                all_generated_ids=all_generated_ids,
+                all_generated_ids=context.token_histories,
                 all_sampling_params=all_sampling_params,
             )
 

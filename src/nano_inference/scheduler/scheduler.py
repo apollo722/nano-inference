@@ -124,45 +124,59 @@ class OrcaScheduler(SchedulerBase):
         with self._lock:
             batch: List[GenerateQuery] = []
 
-            # Temporary list to hold decodes that we couldn't schedule this time
-            skipped_decodes = []
+            # 1. Prioritize decode requests (latency)
+            if self._decode_waiting:
+                while self._decode_waiting and len(batch) < self.config.max_batch_size:
+                    query = self._decode_waiting.popleft()
 
-            # 1. First, fill with decode requests (prioritize latency)
-            while self._decode_waiting and len(batch) < self.config.max_batch_size:
-                query = self._decode_waiting.popleft()
+                    # Ensure KV block has space for at least 1 more token
+                    if self.allocator:
+                        if query.kv_cache_block is None:
+                            logger.warning(
+                                f"[Scheduler] req {query.request_id} has no KV block in decode stage. Skipping."
+                            )
+                            self._running.add(query.request_id)
+                            self.finish_tasks([query.request_id])
+                            continue
 
-                # Ensure KV block has space for at least 1 more token
-                if self.allocator:
-                    if query.kv_cache_block is None:
-                        logger.warning(
-                            f"[Scheduler] req {query.request_id} has no KV block in decode stage. Skipping and finishing."
-                        )
-                        # Don't drop it into the void, finish it properly if it's broken
-                        self._running.add(
-                            query.request_id
-                        )  # mark as running so finish_tasks works
-                        self.finish_tasks([query.request_id])
-                        continue
+                        try:
+                            # Attempt allocation
+                            while query.kv_cache_block.free_slots < 1:
+                                self.allocator.allocate_token(query.kv_cache_block)
+                        except RuntimeError as e:
+                            # KV OOM -> Preempt newest request (LIFO) and retry
+                            logger.warning(
+                                f"[Scheduler] KV OOM during decode for {query.request_id}: {e}. Triggering preemption."
+                            )
 
-                    try:
-                        # Ensure we have enough blocks for history + 1 new token
-                        while query.kv_cache_block.free_slots < 1:
-                            self.allocator.allocate_token(query.kv_cache_block)
-                    except RuntimeError as e:
-                        logger.warning(
-                            f"[Scheduler] Deferring decode for {query.request_id}: {e}"
-                        )
-                        skipped_decodes.append(query)
-                        continue
+                            # Find a preemptable request (can be current batch or already running)
+                            # Simple Nano heuristic: preempt from _running or _decode_waiting
+                            preempted = self._perform_lifo_preemption()
+                            if preempted:
+                                # Retry allocation for the same query
+                                try:
+                                    while query.kv_cache_block.free_slots < 1:
+                                        self.allocator.allocate_token(
+                                            query.kv_cache_block
+                                        )
+                                except RuntimeError:
+                                    # Still failing? Defer this query.
+                                    self._decode_waiting.appendleft(query)
+                                    continue
+                            else:
+                                # No one left to preempt
+                                self._decode_waiting.appendleft(query)
+                                continue
 
-                self._running.add(query.request_id)
-                batch.append(query)
+                    self._running.add(query.request_id)
+                    batch.append(query)
 
-            # Put skipped decodes back to the front
-            for q in reversed(skipped_decodes):
-                self._decode_waiting.appendleft(q)
+                # If we have decodes, return them exclusively (Homogeneous)
+                if batch:
+                    self._last_batch_size = len(batch)
+                    return batch
 
-            # 2. Then, if there is still room, add prefill requests (throughput)
+            # 2. If no decodes, schedule prefill requests (throughput)
             prefill_added = 0
             while (
                 self._prefill_waiting
@@ -203,11 +217,58 @@ class OrcaScheduler(SchedulerBase):
 
             if batch:
                 logger.debug(
-                    f"[Scheduler] Scheduled batch of {len(batch)} "
-                    f"(decodes={len(batch)-prefill_added}, prefills={prefill_added})"
+                    f"[Scheduler] Scheduled batch of {len(batch)} (prefills={prefill_added})"
                 )
             self._last_batch_size = len(batch)
             return batch
+
+    def _perform_lifo_preemption(self) -> bool:
+        """Find the newest request and preempt it to free up KV blocks.
+
+        Nano strategy:
+        1. Try to find a request in the decode waiting queue first (easiest).
+        2. If empty, we could preempt from 'running', but in our current
+           single-threaded step architecture, 'running' is only populated
+           during the schedule() call for the NEXT step.
+           So we actually look at self._queries and pick one that is not in the current batch.
+        """
+        # 1. Preempt from end of decode waiting (newest)
+        if self._decode_waiting:
+            q = self._decode_waiting.pop()
+            self.preempt_request(q.request_id)
+            return True
+
+        # 2. Fallback: Preempt from prefill queue if somehow it has blocks (rare)
+        if self._prefill_waiting:
+            q = self._prefill_waiting.pop()
+            if q.kv_cache_block:
+                self.preempt_request(q.request_id)
+                return True
+
+        return False
+
+    def preempt_request(self, request_id: str) -> None:
+        """Preempt a request: free its KV cache and reset to prefill stage."""
+        query = self._queries.get(request_id)
+        if not query:
+            return
+
+        logger.info(f"[Scheduler] Preempting request {request_id} (recompute strategy)")
+
+        # 1. Free KV Cache
+        if self.allocator and query.kv_cache_block:
+            self.allocator.free(query.kv_cache_block)
+            query.kv_cache_block = None
+
+        # 2. Reset Query State for recompute
+        query.stage = GenerationStage.PREFILL
+        query.output_token_ids = []
+        query.computed_length = 0
+
+        # 3. Move back to prefill waiting queue (at the front so it's prioritized later)
+        self._running.discard(request_id)
+        if query not in self._prefill_waiting:
+            self._prefill_waiting.appendleft(query)
 
     def on_step_completed(self, request_ids: List[str]) -> None:
         with self._lock:

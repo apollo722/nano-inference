@@ -38,3 +38,5 @@ class GenerateContext:
 
     # Internal Tracking
     request_ids: List[str]
+    # Phase 3+: Full token history per request (prompt + generated) for sampler
+    token_histories: List[List[int]]

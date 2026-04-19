@@ -128,10 +128,18 @@ class GenerateContextBuilder:
             is_prefill=is_prefill,
         )
 
+        # 6. Build Token Histories for Repetition Penalty
+        token_histories = []
+        for q in queries:
+            token_histories.append(
+                q.generation_inputs.prompt_token_ids + q.output_token_ids
+            )
+
         return GenerateContext(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             metadata=metadata,
             request_ids=[q.request_id for q in queries],
+            token_histories=token_histories,
         )

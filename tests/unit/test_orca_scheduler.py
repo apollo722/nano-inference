@@ -85,9 +85,13 @@ def test_orca_scheduler_respects_max_prefill_limit():
     q3.stage = GenerationStage.DECODE
     scheduler.add_tasks([q3])
 
-    # 4. Schedule should pick the decode task AND the remaining prefill task
-    # because max_batch_size is 4 and max_prefill is 1.
+    # 4. Schedule should pick only the decode task (Homogeneous)
     batch2 = scheduler.schedule()
-    assert len(batch2) == 2
+    assert len(batch2) == 1
     assert batch2[0].request_id == "q3"
-    assert batch2[1].request_id == "q2"
+
+    # 5. Next schedule should pick the remaining prefill
+    scheduler.finish_tasks(["q3"])
+    batch3 = scheduler.schedule()
+    assert len(batch3) == 1
+    assert batch3[0].request_id == "q2"
