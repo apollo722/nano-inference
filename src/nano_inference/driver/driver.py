@@ -273,6 +273,8 @@ class AsyncDriver(DriverBase):
                         finished_reason=getattr(query, "finished_reason", None),
                         delta_text=getattr(query, "delta_text", ""),
                         full_text=getattr(query, "full_text", ""),
+                        prompt_tokens=len(query.generation_inputs.prompt_token_ids),
+                        completion_tokens=len(query.output_token_ids),
                     )
 
                     logger.debug(

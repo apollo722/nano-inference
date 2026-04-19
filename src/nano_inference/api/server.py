@@ -124,7 +124,11 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                     created=int(arrival_time),
                     model=request.model,
                     choices=[choice],
-                    usage=None,
+                    usage={
+                        "prompt_tokens": output.prompt_tokens,
+                        "completion_tokens": output.completion_tokens,
+                        "total_tokens": output.prompt_tokens + output.completion_tokens,
+                    },
                 )
 
             # Streaming: return StreamingResponse
@@ -153,7 +157,12 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                             created=int(arrival_time),
                             model=request.model,
                             choices=[choice],
-                            usage=None,
+                            usage={
+                                "prompt_tokens": output.prompt_tokens,
+                                "completion_tokens": output.completion_tokens,
+                                "total_tokens": output.prompt_tokens
+                                + output.completion_tokens,
+                            },
                         )
 
                         yield f"data: {json.dumps(response.model_dump())}\n\n"
@@ -219,7 +228,11 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                     created=int(arrival_time),
                     model=request.model,
                     choices=[choice],
-                    usage=None,
+                    usage={
+                        "prompt_tokens": output.prompt_tokens,
+                        "completion_tokens": output.completion_tokens,
+                        "total_tokens": output.prompt_tokens + output.completion_tokens,
+                    },
                 )
 
             # Streaming chat response
@@ -246,7 +259,12 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
                             created=int(arrival_time),
                             model=request.model,
                             choices=[choice],
-                            usage=None,
+                            usage={
+                                "prompt_tokens": output.prompt_tokens,
+                                "completion_tokens": output.completion_tokens,
+                                "total_tokens": output.prompt_tokens
+                                + output.completion_tokens,
+                            },
                         )
                         yield f"data: {json.dumps(response.model_dump())}\n\n"
                 finally:

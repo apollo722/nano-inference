@@ -75,3 +75,5 @@ class GenerateOutput:
     finished_reason: Optional[FinishedReason] = None
     delta_text: str = ""
     full_text: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
