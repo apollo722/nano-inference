@@ -212,6 +212,30 @@ class AsyncDriver(DriverBase):
                         break
 
                 # 2. Schedule and execute (NO LOCK HELD)
+
+                # Dynamic batching wait logic:
+                # If we have prefills but fewer than max, wait a bit to see if more arrive.
+                # Only do this if we aren't already decoding anything (to not stall active users).
+                stats = self.scheduler.get_stats()
+
+                # Safely get scheduler config
+                from nano_inference.core.config import RuntimeConfig, SchedulerConfig
+
+                sched_config = None
+                if isinstance(self.config, RuntimeConfig):
+                    sched_config = self.config.scheduler
+                elif isinstance(self.config, SchedulerConfig):
+                    sched_config = self.config
+
+                if (
+                    sched_config
+                    and stats.get("num_decode_waiting", 0) == 0
+                    and 0
+                    < stats.get("num_prefill_waiting", 0)
+                    < sched_config.max_prefill_batch_size
+                ):
+                    time.sleep(sched_config.prefill_batch_delay)
+
                 queries = self.scheduler.schedule()
                 if not queries:
                     time.sleep(0.01)
