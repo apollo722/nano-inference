@@ -181,10 +181,10 @@ class HuggingFaceInferencer(InferencerBase):
 
         # VLM Check: we don't yet support batched VLM forward in step()
         if self.is_vlm:
-            # In a real scenario, we'd check if any query has images
-            # For Phase 2, we just warn or raise if we can't handle it here
-            pass
-
+            raise NotImplementedError(
+                "HuggingFaceInferencer.step() does not yet support Vision-Language models. "
+                "Please use the monolithic generate() path for VLMs."
+            )
         with torch.inference_mode():
             # HF models usually expect attention_mask to be 1 for valid, 0 for padding
             # Our GenerateContext.attention_mask is already boolean (True=keep)
