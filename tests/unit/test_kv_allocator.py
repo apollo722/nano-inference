@@ -9,6 +9,7 @@ def test_allocator_initialization():
     block_size = 16
     num_heads = 4
     head_dim = 32
+    num_layers = 2
     device = "cpu"
 
     allocator = PagedKVCacheAllocator(
@@ -16,12 +17,25 @@ def test_allocator_initialization():
         block_size=block_size,
         num_heads=num_heads,
         head_dim=head_dim,
+        num_layers=num_layers,
         device=device,
     )
 
     assert allocator.num_free_blocks == num_blocks
-    assert allocator.k_cache.shape == (num_blocks, num_heads, block_size, head_dim)
-    assert allocator.v_cache.shape == (num_blocks, num_heads, block_size, head_dim)
+    assert allocator.k_cache.shape == (
+        num_layers,
+        num_blocks,
+        num_heads,
+        block_size,
+        head_dim,
+    )
+    assert allocator.v_cache.shape == (
+        num_layers,
+        num_blocks,
+        num_heads,
+        block_size,
+        head_dim,
+    )
     assert allocator.utilization == 0.0
 
 

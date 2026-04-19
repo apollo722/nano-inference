@@ -96,15 +96,16 @@ class NaiveRotaryEmbedding(RotaryEmbeddingBase):
             position_ids: (batch, seq)
         """
         # Calculate angular frequencies for each position
-        # freqs Shape: (batch, seq, head_dim/2)
-        freqs = position_ids.to(torch.float32)[..., None] * self.inv_freq[None, None, :]
+        # position_ids: [B, S], inv_freq: [D/2] -> freqs: [B, S, D/2]
+        freqs = position_ids.float().unsqueeze(-1) * self.inv_freq.unsqueeze(
+            0
+        ).unsqueeze(0)
 
         # emb Shape: (batch, seq, head_dim)
-        # Duplicate freqs to cover both sin and cos components of the rotation
+        # Standard RoPE uses [freqs, freqs] to match [x_first_half, x_second_half]
         emb = torch.cat((freqs, freqs), dim=-1)
 
         # cos/sin Shape: (batch, seq, 1, head_dim)
-        # unsqueeze(2) adds a dimension for num_heads to allow broadcasting across heads
         cos = emb.cos().to(dtype=q.dtype, device=q.device).unsqueeze(2)
         sin = emb.sin().to(dtype=q.dtype, device=q.device).unsqueeze(2)
 

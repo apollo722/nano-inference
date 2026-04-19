@@ -128,6 +128,7 @@ class TorchInferencer(InferencerBase):
             block_size=16,
             num_heads=num_kv_heads,
             head_dim=head_dim,
+            num_layers=self.model.config.num_layers,
             dtype=next(self.model.parameters()).dtype,
             device=str(self.device),
         )

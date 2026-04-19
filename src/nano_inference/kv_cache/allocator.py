@@ -18,6 +18,7 @@ class PagedKVCacheAllocator:
         block_size: int,
         num_heads: int,
         head_dim: int,
+        num_layers: int = 1,
         dtype: torch.dtype = torch.float16,
         device: str = "cuda",
     ):
@@ -25,15 +26,15 @@ class PagedKVCacheAllocator:
         self.block_size = block_size
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.num_layers = num_layers
         self.device = torch.device(device)
 
         # 1. Initialize the free-list
         self.free_blocks: List[int] = list(range(num_blocks))
 
         # 2. Allocate the physical storage
-        # Shape: [num_blocks, num_heads, block_size, head_dim]
-        # We create separate tensors for K and V
-        cache_shape = (num_blocks, num_heads, block_size, head_dim)
+        # Shape: [num_layers, num_blocks, num_heads, block_size, head_dim]
+        cache_shape = (num_layers, num_blocks, num_heads, block_size, head_dim)
         self.k_cache = torch.zeros(cache_shape, dtype=dtype, device=self.device)
         self.v_cache = torch.zeros(cache_shape, dtype=dtype, device=self.device)
 

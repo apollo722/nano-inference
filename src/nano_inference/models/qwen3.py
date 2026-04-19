@@ -91,6 +91,9 @@ class Qwen3TransformerModel(nn.Module):
         self.layers = nn.ModuleList(
             [Qwen3DecoderBlock(config) for _ in range(config.num_layers)]
         )
+        # Set layer indices for Paged Attention
+        for i, layer in enumerate(self.layers):
+            layer.self_attn.layer_idx = i
         self.norm = NaiveRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
