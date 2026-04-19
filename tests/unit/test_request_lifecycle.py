@@ -28,6 +28,7 @@ def config():
     return SchedulerConfig(
         max_num_requests=2,
         request_timeout=0.1,  # Very short timeout for testing
+        prefill_batch_delay=0.0,  # No delay in tests
     )
 
 
