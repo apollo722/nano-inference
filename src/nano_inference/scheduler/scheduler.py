@@ -64,6 +64,11 @@ class SchedulerBase(ABC):
         """Get total number of pending/processing tasks."""
         ...
 
+    @abstractmethod
+    def get_stats(self) -> dict:
+        """Get scheduler statistics."""
+        ...
+
 
 class OrcaScheduler(SchedulerBase):
     """Orca-style continuous batching scheduler.
@@ -257,6 +262,17 @@ class OrcaScheduler(SchedulerBase):
                 + len(self._decode_waiting)
                 + len(self._running)
             )
+
+    def get_stats(self) -> dict:
+        with self._lock:
+            stats = {
+                "num_running": len(self._running),
+                "num_prefill_waiting": len(self._prefill_waiting),
+                "num_decode_waiting": len(self._decode_waiting),
+            }
+            if self.allocator:
+                stats["kv_utilization"] = self.allocator.utilization
+            return stats
 
 
 class SimpleScheduler(OrcaScheduler):

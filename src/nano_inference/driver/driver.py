@@ -86,6 +86,7 @@ class AsyncDriver(DriverBase):
         self._running = False
         self._generate_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._last_stats_log_time = 0.0
 
     async def generate_async(self, request: Request) -> GenerateOutput:
         """Asynchronous API: wait for and return the final output."""
@@ -298,6 +299,22 @@ class AsyncDriver(DriverBase):
                         f"[Driver] Rescheduling {len(reschedule_queries)} queries"
                     )
                     self.scheduler.add_tasks(reschedule_queries)
+
+                # 3. Log metrics periodically (Phase 3 deliverable: KV utilization visible)
+                current_time = time.time()
+                if current_time - self._last_stats_log_time >= 5.0:
+                    stats = self.scheduler.get_stats()
+                    running = stats.get("num_running", 0)
+                    prefill = stats.get("num_prefill_waiting", 0)
+                    decode = stats.get("num_decode_waiting", 0)
+                    kv_util = stats.get("kv_utilization", 0.0) * 100
+
+                    logger.info(
+                        f"[Metrics] Running={running} | Waiting(P/D)={prefill}/{decode} | "
+                        f"KV Util={kv_util:.1f}%"
+                    )
+                    self._last_stats_log_time = current_time
+
             except Exception as e:
                 logger.error(
                     f"[Driver] Fatal error in AsyncDriver loop: {e}", exc_info=True
