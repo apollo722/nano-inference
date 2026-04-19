@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from nano_inference.core.context import AttentionMetadata
 from nano_inference.layers.norm import NaiveRMSNorm
 from nano_inference.layers.rotary import NaiveRotaryEmbedding
 
@@ -191,9 +192,6 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         )
 
         return self.o_proj(attn_out)
-
-
-from nano_inference.core.context import AttentionMetadata
 
 
 class PagedCausalSelfAttention(NaiveCausalSelfAttention):
