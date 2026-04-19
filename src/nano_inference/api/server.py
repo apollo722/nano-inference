@@ -265,7 +265,7 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
     @app.get("/metrics")
     async def metrics():
         """Expose scheduler and KV cache metrics."""
-        state = app.state.state
+        state = getattr(app.state, "state", None)
         if state is None:
             return {"error": "Application state not initialized"}
         return state.scheduler.get_stats()
