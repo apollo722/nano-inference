@@ -8,7 +8,7 @@ import requests
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Send a request to the Nano-Inference API server.",
+        description="Send a chat request to the Nano-Inference API server.",
     )
     parser.add_argument(
         "--host",
@@ -27,21 +27,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model name to use.",
     )
     parser.add_argument(
-        "--prompt",
-        default="Count: one, two, three,",
-        help="Prompt text to generate from.",
+        "--message",
+        default="Who are you?",
+        help="The message to send to the assistant.",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=16,
+        default=128,
         help="Maximum number of generated tokens.",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.0,
-        help="Sampling temperature. Use 0 for greedy decoding.",
+        default=0.7,
+        help="Sampling temperature.",
     )
     parser.add_argument(
         "--stream",
@@ -53,19 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    url = f"http://{args.host}:{args.port}/v1/completions"
+    url = f"http://{args.host}:{args.port}/v1/chat/completions"
 
-    print(f"Sending request to {url}")
+    print(f"Sending chat request to {url}")
     print(f"Model: {args.model}")
-    print(f"Prompt: {args.prompt}")
-    print(f"Max tokens: {args.max_tokens}")
-    print(f"Temperature: {args.temperature}")
+    print(f"Message: {args.message}")
     print(f"Stream: {args.stream}")
     print()
 
     payload = {
         "model": args.model,
-        "prompt": args.prompt,
+        "messages": [{"role": "user", "content": args.message}],
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "stream": args.stream,
@@ -82,22 +80,18 @@ def main() -> None:
 
         if data.get("choices"):
             choice = data["choices"][0]
-            print("=== Generated Text ===")
-            print(choice["text"])
-            print()
-            print("=== Finish Reason ===")
-            print(choice.get("finish_reason", "unknown"))
-            print()
+            if "message" in choice:
+                print("=== Assistant Message ===")
+                print(choice["message"]["content"])
 
         if data.get("usage"):
-            print("=== Usage ===")
+            print("\n=== Usage ===")
             print(json.dumps(data["usage"], indent=2))
     else:
         response = requests.post(url, json=payload, stream=True)
         response.raise_for_status()
 
-        print("=== Streaming Response ===")
-        full_text = ""
+        print("=== Assistant (Streaming) ===")
         last_data = None
         for line in response.iter_lines():
             if not line:
@@ -110,12 +104,10 @@ def main() -> None:
                 data = json.loads(data_str)
                 last_data = data
                 if data.get("choices"):
-                    text = data["choices"][0]["text"]
-                    full_text += text
-                    print(text, end="", flush=True)
-
+                    delta = data["choices"][0].get("delta", {})
+                    if "content" in delta:
+                        print(delta["content"], end="", flush=True)
         print("\n\n=== Stream Finished ===")
-        print(f"Full text length: {len(full_text)}")
         if last_data and last_data.get("usage"):
             print("\n=== Final Usage ===")
             print(json.dumps(last_data["usage"], indent=2))
