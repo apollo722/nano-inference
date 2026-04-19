@@ -61,6 +61,7 @@ class GenerateContextBuilder:
                 + len(q.output_token_ids)
                 - step_len
             )
+
             position_ids[i, :step_len] = torch.arange(
                 start_pos, start_pos + step_len, device=self.device
             )

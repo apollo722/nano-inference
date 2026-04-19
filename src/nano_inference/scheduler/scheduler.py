@@ -204,7 +204,7 @@ class OrcaScheduler(SchedulerBase):
     def finish_tasks(self, request_ids: List[str]) -> None:
         with self._lock:
             for request_id in request_ids:
-                logger.info(f"[Scheduler] Cleanup request {request_id}")
+                logger.debug(f"[Scheduler] Cleanup request {request_id}")
                 # 1. Remove from running set
                 self._running.discard(request_id)
 
