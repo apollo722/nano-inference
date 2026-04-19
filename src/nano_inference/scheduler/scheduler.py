@@ -1,4 +1,5 @@
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
@@ -88,6 +89,11 @@ class OrcaScheduler(SchedulerBase):
         self._running: Set[str] = set()
         self._queries: Dict[str, GenerateQuery] = {}  # For lookup by ID
         self._last_batch_size = 0
+
+        # Metrics tracking
+        self._total_prompt_tokens = 0
+        self._total_generation_tokens = 0
+        self._start_time = time.time()
 
     def add_tasks(self, queries: List[GenerateQuery]) -> None:
         with self._lock:
@@ -272,14 +278,38 @@ class OrcaScheduler(SchedulerBase):
 
     def get_stats(self) -> dict:
         with self._lock:
+            elapsed = time.time() - self._start_time
+            avg_throughput = 0.0
+            if elapsed > 0:
+                avg_throughput = (
+                    self._total_prompt_tokens + self._total_generation_tokens
+                ) / elapsed
+
             stats = {
                 "num_running": self._last_batch_size,
                 "num_prefill_waiting": len(self._prefill_waiting),
                 "num_decode_waiting": len(self._decode_waiting),
+                "total_prompt_tokens": self._total_prompt_tokens,
+                "total_generation_tokens": self._total_generation_tokens,
+                "avg_throughput_tps": round(avg_throughput, 2),
             }
             if self.allocator:
                 stats["kv_utilization"] = self.allocator.utilization
             return stats
+
+    def record_step(self, queries: List[GenerateQuery], num_new_tokens: int) -> None:
+        """Record tokens processed in a step for throughput metrics."""
+        with self._lock:
+            for query in queries:
+                if query.stage == GenerationStage.PREFILL:
+                    # In prefill, the whole prompt is processed
+                    self._total_prompt_tokens += len(
+                        query.generation_inputs.prompt_token_ids
+                    )
+
+            # Generation tokens = one per query in the batch (since it's a step)
+            # unless it's a mixed batch, but we simplify here.
+            self._total_generation_tokens += num_new_tokens
 
 
 class SimpleScheduler(OrcaScheduler):

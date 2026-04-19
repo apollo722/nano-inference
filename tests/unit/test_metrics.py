@@ -19,14 +19,32 @@ def test_scheduler_get_stats():
     assert stats["num_running"] == 0
     assert stats["kv_utilization"] == 0.0
 
-    # Simulate scheduling
+    # Simulate scheduling and step recording
     block = allocator.allocate(num_tokens=4)  # Uses 1 block
     scheduler._last_batch_size = 1
     scheduler._running.add("test-req")
+    # Simulate a prefill step with 4 tokens
+    from nano_inference.core.request import (
+        GenerateQuery,
+        GenerationInputs,
+        SamplingParams,
+    )
+
+    q = GenerateQuery(
+        request_id="test-req",
+        generation_inputs=GenerationInputs(prompt_token_ids=[1, 2, 3, 4]),
+        sampling_params=SamplingParams(),
+        eos_token_id=0,
+        arrival_time=0.0,
+    )
+    scheduler.record_step([q], 1)
 
     stats = scheduler.get_stats()
     assert stats["num_running"] == 1
     assert stats["kv_utilization"] == pytest.approx(0.1)  # 1/10 blocks
+    assert stats["total_prompt_tokens"] == 4
+    assert stats["total_generation_tokens"] == 1
+    assert stats["avg_throughput_tps"] > 0
 
 
 def test_metrics_endpoint():

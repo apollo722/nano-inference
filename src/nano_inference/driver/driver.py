@@ -228,6 +228,9 @@ class AsyncDriver(DriverBase):
                     # Step the engine for the current batch
                     new_token_ids = self.engine.step(queries)
 
+                    # Record for throughput metrics (Phase 3+)
+                    self.scheduler.record_step(queries, len(new_token_ids))
+
                     # Process outputs and transition states
                     self.output_processor.process_step_outputs(queries, new_token_ids)
                 except Exception as e:
@@ -310,13 +313,13 @@ class AsyncDriver(DriverBase):
                     prefill = stats.get("num_prefill_waiting", 0)
                     decode = stats.get("num_decode_waiting", 0)
                     kv_util = stats.get("kv_utilization", 0.0) * 100
+                    tps = stats.get("avg_throughput_tps", 0.0)
 
                     logger.info(
                         f"[Metrics] Running={running} | Waiting(P/D)={prefill}/{decode} | "
-                        f"KV Util={kv_util:.1f}%"
+                        f"KV Util={kv_util:.1f}% | TPS={tps:.1f}"
                     )
                     self._last_stats_log_time = current_time
-
             except Exception as e:
                 logger.error(
                     f"[Driver] Fatal error in AsyncDriver loop: {e}", exc_info=True
