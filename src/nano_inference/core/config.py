@@ -44,6 +44,7 @@ class SchedulerConfig(BaseConfig):
     max_prefill_batch_size: int = 1
     max_num_requests: int = 100
     request_timeout: float = 300.0
+    prefill_batch_delay: float = 0.05
 
 
 @dataclass
@@ -93,13 +94,16 @@ class RuntimeConfig(BaseConfig):
         parallel_data = data.get("parallel", {})
 
         # 2. Apply CLI overrides to specific sections if provided
-        # (This logic can be expanded to be more granular if needed)
         if cli_overrides:
             for k, v in cli_overrides.items():
                 if v is not None:
                     if k in ["model_dir", "device", "dtype"]:
                         model_data[k] = v
-                    elif k in ["max_batch_size", "request_timeout"]:
+                    elif k in [
+                        "max_batch_size",
+                        "max_prefill_batch_size",
+                        "request_timeout",
+                    ]:
                         scheduler_data[k] = v
 
         # 3. Assemble objects
