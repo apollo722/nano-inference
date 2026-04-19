@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
 
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig
 from nano_inference.core.request import GenerateOutput, GenerateQuery
 from nano_inference.kv_cache import PagedKVCacheAllocator
 from nano_inference.worker import Worker
