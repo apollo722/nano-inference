@@ -9,7 +9,7 @@ scheduler:
   max_prefill_batch_size: 4
   max_num_requests: 100
   request_timeout: 300.0
-  prefill_batch_delay: 0.05
+  prefill_batch_delay: 0.001
 
 parallel:
   tp_size: 1
