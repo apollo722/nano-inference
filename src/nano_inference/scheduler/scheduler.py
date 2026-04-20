@@ -376,17 +376,13 @@ class OrcaScheduler(SchedulerBase):
                     self._total_prompt_tokens += len(
                         query.generation_inputs.prompt_token_ids
                     )
-                    # Transition to DECODE for the next step
-                    query.stage = GenerationStage.DECODE
                 elif query.stage == GenerationStage.RECOMPUTE:
                     # In recompute, Prompt + existing output history is processed
-                    # Note: output_token_ids already contains the token generated in this step
-                    # so we subtract 1 to get the actual "recomputed" historical tokens.
+                    # Note: record_step is called BEFORE process_step_outputs in the Driver,
+                    # so output_token_ids does NOT contain the new token yet.
                     self._total_prompt_tokens += len(
                         query.generation_inputs.prompt_token_ids
-                    ) + (len(query.output_token_ids) - 1)
-                    # Transition back to DECODE for the next step
-                    query.stage = GenerationStage.DECODE
+                    ) + len(query.output_token_ids)
 
             # Generation tokens = one per query in the batch (since it's a step)
             # unless it's a mixed batch, but we simplify here.

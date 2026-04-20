@@ -49,13 +49,15 @@ def test_preemption_preserves_history():
     output_processor._is_eos_token = MagicMock(return_value=False)
     output_processor.input_processor.decode.return_value = "token1"
 
-    # Context must be built BEFORE record_step (which transitions stage)
+    # Context must be built BEFORE record_step (which might transition stage later)
     builder = GenerateContextBuilder(device="cpu")
     context = builder.build(batch)
     assert context.input_ids[0].tolist() == [1, 2, 3]
 
+    scheduler.record_step(
+        batch, 1
+    )  # Record BEFORE process_step_outputs like Driver does
     output_processor.process_step_outputs(batch, [10])
-    scheduler.record_step(batch, 1)  # Record transitions stage
 
     assert query.stage == GenerationStage.DECODE
     assert query.output_token_ids == [10]
@@ -81,14 +83,15 @@ def test_preemption_preserves_history():
 
     # 6. Process recompute output
     output_processor.input_processor.decode.return_value = "token2"
+    scheduler.record_step(batch2, 1)  # Record BEFORE process_step_outputs
     output_processor.process_step_outputs(batch2, [11])
-    scheduler.record_step(batch2, 1)  # 1 new token
 
     assert query.stage == GenerationStage.DECODE  # Transitions back
 
     stats = scheduler.get_stats()
     # Total Prompt = 3 (from prefill) + (3+1) (from recompute) = 7
     assert stats["total_prompt_tokens"] == 7
+
     # Total Gen = 1 (from prefill) + 1 (from recompute) = 2
     assert stats["total_generation_tokens"] == 2
     assert query.output_token_ids == [10, 11]
@@ -111,8 +114,8 @@ def test_accounting_not_reset_after_preemption():
     # Step 1: Prefill -> 1 token generated
     output_processor.input_processor.decode.return_value = "token1"
     batch = scheduler.schedule()
-    output_processor.process_step_outputs(batch, [10])
     scheduler.record_step(batch, 1)
+    output_processor.process_step_outputs(batch, [10])
 
     assert len(query.output_token_ids) == 1
     assert query.stage == GenerationStage.DECODE
@@ -125,9 +128,8 @@ def test_accounting_not_reset_after_preemption():
     # Step 3: Recompute -> 1 MORE token generated
     output_processor.input_processor.decode.return_value = "token2"
     batch = scheduler.schedule()
-    output_processor.process_step_outputs(batch, [11])
     scheduler.record_step(batch, 1)
-
+    output_processor.process_step_outputs(batch, [11])
     # Should be FINISHED now because total tokens (10, 11) == max_new_tokens (2)
     assert len(query.output_token_ids) == 2
     assert query.stage == GenerationStage.FINISHED
