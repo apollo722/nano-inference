@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List, Optional, Tuple
 
 import torch
 from nano_inference.core.context import AttentionMetadata, GenerateContext
@@ -9,10 +9,76 @@ class GenerateContextBuilder:
     """Builds a GenerateContext from a list of active queries.
 
     Phase 3: Now supports Paged Attention metadata and partial input re-feeding.
+    Phase 4: Extended with mRoPE position IDs and VLM image propagation.
     """
 
     def __init__(self, device: torch.device):
         self.device = device
+
+    def _build_mrope_for_batch(
+        self,
+        queries: List[GenerateQuery],
+        all_step_token_ids: List[List[int]],
+        position_ids: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Build (3, B, S_step) mRoPE position tensor if any query uses VLM.
+
+        Returns None if no query has mrope_position_ids (text-only batch).
+        """
+        has_mrope = any(
+            q.generation_inputs.mrope_position_ids is not None for q in queries
+        )
+        if not has_mrope:
+            return None
+
+        batch_size = len(queries)
+        max_step_len = position_ids.shape[1]
+        mrope = torch.zeros(
+            (3, batch_size, max_step_len), dtype=torch.long, device=self.device
+        )
+
+        for i, (q, step_ids) in enumerate(zip(queries, all_step_token_ids)):
+            step_len = len(step_ids)
+            q_mrope = q.generation_inputs.mrope_position_ids
+
+            if q.stage == GenerationStage.PREFILL:
+                # Prompt: use precomputed mrope (3, prompt_len)
+                assert q_mrope is not None
+                mrope[:, i, :step_len] = q_mrope[:, :step_len].to(self.device)
+
+            elif q.stage == GenerationStage.RECOMPUTE:
+                # Prompt portion from precomputed mrope; output portion is text → same pos all axes
+                prompt_len = len(q.generation_inputs.prompt_token_ids)
+                output_ids = q.output_token_ids
+                if q_mrope is not None:
+                    mrope[:, i, :prompt_len] = q_mrope[:, :prompt_len].to(self.device)
+                    # Output tokens are text; continue positions from end of prompt mrope
+                    last_pos = int(q_mrope[0, -1].item())
+                    for j, _ in enumerate(output_ids):
+                        p = last_pos + j + 1
+                        mrope[0, i, prompt_len + j] = p
+                        mrope[1, i, prompt_len + j] = p
+                        mrope[2, i, prompt_len + j] = p
+                else:
+                    # Text-only recompute: all 3 axes = 1D position
+                    for j in range(step_len):
+                        p = int(position_ids[i, j].item())
+                        mrope[0, i, j] = p
+                        mrope[1, i, j] = p
+                        mrope[2, i, j] = p
+
+            else:  # DECODE
+                # New text token: all 3 axes = same scalar
+                if q_mrope is not None:
+                    last_prompt_pos = int(q_mrope[0, -1].item())
+                    decode_pos = last_prompt_pos + len(q.output_token_ids)
+                else:
+                    decode_pos = int(position_ids[i, 0].item())
+                mrope[0, i, 0] = decode_pos
+                mrope[1, i, 0] = decode_pos
+                mrope[2, i, 0] = decode_pos
+
+        return mrope
 
     def build(self, queries: List[GenerateQuery]) -> GenerateContext:
         if not queries:
@@ -126,19 +192,43 @@ class GenerateContextBuilder:
                     physical_block_id * block_size + block_offset
                 )
 
+        # 6. mRoPE position IDs (VLM only; None for text-only batches)
+        mrope_position_ids = self._build_mrope_for_batch(
+            queries, all_step_token_ids, position_ids
+        )
+
         metadata = AttentionMetadata(
             context_lens=context_lens,
             kv_block_tables=block_tables,
             slot_mapping=slot_mapping,
             is_prefill=is_prefill,
+            mrope_position_ids=mrope_position_ids,
         )
 
-        # 6. Build Token Histories for Repetition Penalty
+        # 7. Build Token Histories for Repetition Penalty
         token_histories = []
         for q in queries:
             token_histories.append(
                 q.generation_inputs.prompt_token_ids + q.output_token_ids
             )
+
+        # 8. Collect images and grid info for VLM prefill pass
+        context_images: Optional[List[Any]] = None
+        context_image_grid_thw: Optional[List[Tuple[int, int, int]]] = None
+        if is_prefill:
+            all_images: List[Any] = []
+            all_grids: List[Tuple[int, int, int]] = []
+            for q in queries:
+                if (
+                    q.stage in (GenerationStage.PREFILL, GenerationStage.RECOMPUTE)
+                    and q.generation_inputs.images
+                ):
+                    all_images.extend(q.generation_inputs.images)
+                    if q.generation_inputs.image_grid_thw:
+                        all_grids.extend(q.generation_inputs.image_grid_thw)
+            if all_images:
+                context_images = all_images
+                context_image_grid_thw = all_grids or None
 
         return GenerateContext(
             input_ids=input_ids,
@@ -147,4 +237,6 @@ class GenerateContextBuilder:
             metadata=metadata,
             request_ids=[q.request_id for q in queries],
             token_histories=token_histories,
+            images=context_images,
+            image_grid_thw=context_image_grid_thw,
         )

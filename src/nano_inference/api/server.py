@@ -1,9 +1,11 @@
 import argparse
+import base64
+import io
 import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Union
+from typing import Any, AsyncGenerator, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -15,6 +17,7 @@ from nano_inference.api.protocol import (
     CompletionChoice,
     CompletionRequest,
     CompletionResponse,
+    ContentPart,
 )
 from nano_inference.core.config import (
     KVCacheConfig,
@@ -30,7 +33,65 @@ from nano_inference.input_processor import ChatTemplateInputProcessor
 from nano_inference.kv_cache import PagedKVCacheAllocator
 from nano_inference.scheduler import OrcaScheduler
 from nano_inference.utils.logger import logger
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer
+
+
+def _is_vision_language_model(model_dir: str) -> bool:
+    try:
+        config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+        if hasattr(config, "vision_config"):
+            return True
+        for arch in getattr(config, "architectures", []) or []:
+            if any(kw in arch for kw in ("Vision", "VL", "ImageText")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _load_image_from_url(url: str) -> Any:
+    """Load a PIL Image from a URL or data URI."""
+    from PIL import Image
+
+    if url.startswith("data:"):
+        # data:image/<ext>;base64,<data>
+        header, data = url.split(",", 1)
+        image_bytes = base64.b64decode(data)
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    import urllib.request
+
+    with urllib.request.urlopen(url) as resp:
+        return Image.open(io.BytesIO(resp.read())).convert("RGB")
+
+
+def _extract_images_and_messages(
+    messages: List[ChatCompletionMessage],
+) -> tuple[List[dict], List[Any]]:
+    """Convert API messages to (plain_dicts, images) for VLMInputProcessor.
+
+    Returns:
+        plain_messages: list of dicts suitable for apply_chat_template
+        images: list of PIL Images extracted from image_url content parts
+    """
+    plain_messages = []
+    images = []
+    for msg in messages:
+        if isinstance(msg.content, str):
+            plain_messages.append({"role": msg.role, "content": msg.content})
+        else:
+            # Multi-modal: keep the content as a list of dicts for the chat template
+            content_list = []
+            for part in msg.content:
+                if part.type == "text":
+                    content_list.append({"type": "text", "text": part.text})
+                elif part.type == "image_url" and part.image_url:
+                    url = part.image_url.get("url", "")
+                    img = _load_image_from_url(url)
+                    images.append(img)
+                    content_list.append({"type": "image"})
+            plain_messages.append({"role": msg.role, "content": content_list})
+    return plain_messages, images
 
 
 class AppState:
@@ -38,10 +99,25 @@ class AppState:
 
     def __init__(self, config: RuntimeConfig, inferencer_type: str = "torch"):
         self.config = config
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.model.model_dir, trust_remote_code=True
-        )
-        self.input_processor = ChatTemplateInputProcessor(self.tokenizer)
+        self._is_vlm = _is_vision_language_model(config.model.model_dir)
+
+        if self._is_vlm:
+            processor = AutoProcessor.from_pretrained(
+                config.model.model_dir, trust_remote_code=True
+            )
+            self.tokenizer = processor.tokenizer
+            from nano_inference.input_processor.vlm import Qwen25VLInputProcessor
+
+            self.input_processor = Qwen25VLInputProcessor(
+                tokenizer=self.tokenizer,
+                processor=processor,
+            )
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                config.model.model_dir, trust_remote_code=True
+            )
+            self.input_processor = ChatTemplateInputProcessor(self.tokenizer)
+
         self.engine = SingleWorkerEngine(inferencer_type, config.model)
 
         # Trigger dynamic memory profiling and cache initialization
@@ -187,13 +263,32 @@ def create_app(config: RuntimeConfig, inferencer_type: str = "torch") -> FastAPI
         )
 
         try:
-            # Convert ChatCompletionMessage objects to dicts for the input processor
-            messages = [
-                {"role": m.role, "content": m.content} for m in request.messages
-            ]
-            gen_inputs = state.input_processor.encode(
-                messages, add_generation_prompt=True
+            # Detect multi-modal content and extract images
+            has_images = any(
+                isinstance(m.content, list)
+                and any(p.type == "image_url" for p in m.content)
+                for m in request.messages
             )
+
+            if has_images and state._is_vlm:
+                plain_messages, images = _extract_images_and_messages(request.messages)
+                gen_inputs = state.input_processor.encode(
+                    plain_messages, images=images, add_generation_prompt=True
+                )
+            else:
+                # Text-only path: flatten content to strings
+                messages = []
+                for m in request.messages:
+                    if isinstance(m.content, str):
+                        content = m.content
+                    else:
+                        content = " ".join(
+                            p.text for p in m.content if p.type == "text" and p.text
+                        )
+                    messages.append({"role": m.role, "content": content})
+                gen_inputs = state.input_processor.encode(
+                    messages, add_generation_prompt=True
+                )
 
             arrival_time = time.time()
             request_id = f"chatreq-{uuid.uuid4().hex}"

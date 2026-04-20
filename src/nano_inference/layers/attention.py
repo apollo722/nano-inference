@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from nano_inference.core.context import AttentionMetadata
 from nano_inference.layers.norm import NaiveRMSNorm
-from nano_inference.layers.rotary import NaiveRotaryEmbedding
+from nano_inference.layers.rotary import NaiveRotaryEmbedding, Qwen25VLLMRotaryEmbedding
 
 
 def scaled_dot_product_attention(
@@ -141,6 +141,15 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         self.k_norm = NaiveRMSNorm(self.head_dim) if use_qk_norm else None
         self.rotary = NaiveRotaryEmbedding(head_dim=self.head_dim, base=rope_base)
 
+    def _apply_rotary(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: torch.Tensor,
+        metadata: Optional[AttentionMetadata] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.rotary(q, k, position_ids)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -161,7 +170,7 @@ class NaiveCausalSelfAttention(CausalSelfAttentionBase):
         if self.k_norm is not None:
             k = self.k_norm(k)
 
-        q, k = self.rotary(q, k, position_ids)
+        q, k = self._apply_rotary(q, k, position_ids, metadata)
 
         if self.num_kv_heads != self.num_heads:
             num_repeats = self.num_heads // self.num_kv_heads
@@ -253,7 +262,7 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
             k = self.k_norm(k)
 
         # 2. RoPE
-        q, k = self.rotary(q, k, position_ids)
+        q, k = self._apply_rotary(q, k, position_ids, metadata)
 
         # 3. Write Phase (In-place update to physical cache)
         if k_cache is not None and v_cache is not None and slot_mapping is not None:
@@ -329,3 +338,34 @@ class PagedCausalSelfAttention(NaiveCausalSelfAttention):
             .view(batch_size, seq_step, self.num_heads * self.head_dim)
         )
         return self.o_proj(attn_out)
+
+
+class Qwen25VLDecoderAttention(PagedCausalSelfAttention):
+    """PagedCausalSelfAttention with mRoPE for Qwen2.5-VL decoder layers.
+
+    Only the rotary application differs: uses Qwen25VLLMRotaryEmbedding with
+    3-axis position IDs from AttentionMetadata.mrope_position_ids when present.
+    All paged attention logic (KV write, gather, GQA, output proj) is inherited.
+    """
+
+    def __init__(self, *args, mrope_section=(16, 24, 24), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rotary = Qwen25VLLMRotaryEmbedding(
+            head_dim=self.head_dim,
+            base=self.rotary.base,
+            mrope_section=mrope_section,
+        )
+
+    def _apply_rotary(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: torch.Tensor,
+        metadata: Optional[AttentionMetadata] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if metadata is not None and metadata.mrope_position_ids is not None:
+            effective_pos = metadata.mrope_position_ids  # (3, B, S)
+        else:
+            # Text-only fallback: broadcast scalar positions to all 3 axes
+            effective_pos = position_ids.unsqueeze(0).expand(3, -1, -1)
+        return self.rotary(q, k, effective_pos)

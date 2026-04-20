@@ -19,7 +19,9 @@ from nano_inference.sampling import Sampler
 from nano_inference.utils.logger import logger
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
+    AutoProcessor,
     AutoTokenizer,
 )
 
@@ -37,9 +39,15 @@ class TorchInferencer(InferencerBase):
     def __init__(self):
         self.model = None
         self.tokenizer = None
+        self.processor = None  # set for VLM models (HF AutoProcessor)
         self.device = None
         self.load_report: Optional[LoadReport] = None
         self.sampler = Sampler()
+        self._is_vlm: bool = False
+
+    @property
+    def is_vlm(self) -> bool:
+        return self._is_vlm
 
     def load_model(self, model_config: ModelConfig) -> None:
         dtype = DTYPE_MAP.get(model_config.dtype, torch.float16)
@@ -55,32 +63,37 @@ class TorchInferencer(InferencerBase):
             trust_remote_code=True,
         )
 
-        architectures = getattr(config, "architectures", []) or []
+        self._is_vlm = self._is_vision_language_model(config)
 
-        # Check if this is a VL model - we don't support VL yet
-        if self._is_vision_language_model(config):
-            raise NotImplementedError(
-                f"Vision-language models are not yet supported by TorchInferencer. "
-                f"Detected model architecture: {architectures}. "
-                f"Please use HuggingFaceInferencer for VL models, or use a text-only LLM with TorchInferencer."
+        if self._is_vlm:
+            # Load processor (contains both tokenizer and image_processor)
+            processor = AutoProcessor.from_pretrained(
+                model_config.model_dir,
+                trust_remote_code=True,
             )
-
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_config.model_dir,
-            trust_remote_code=True,
-        )
+            self.processor = processor
+            self.tokenizer = processor.tokenizer
+            hf_model = AutoModel.from_pretrained(
+                model_config.model_dir,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+            )
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_config.model_dir,
+                trust_remote_code=True,
+            )
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                model_config.model_dir,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+            )
 
         hf_config = load_hf_config(model_config.model_dir)
         loader = select_loader(hf_config)
         decoder_config = loader.to_decoder_config(
             hf_config,
             runtime_config=model_config,
-        )
-
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_config.model_dir,
-            dtype=dtype,
-            trust_remote_code=True,
         )
 
         remapped_state_dict = loader.remap_state_dict(
@@ -99,6 +112,11 @@ class TorchInferencer(InferencerBase):
         self.model.to(device=self.device, dtype=dtype)
         self.model.eval()
 
+        # For VLM: wire the image_processor into the model for prefill
+        if self._is_vlm and hasattr(processor, "image_processor"):
+            self.model.model.image_processor = processor.image_processor
+
+        architectures = getattr(config, "architectures", []) or []
         logger.info(f"Model loaded: {architectures}")
 
     def generate(
@@ -194,6 +212,7 @@ class TorchInferencer(InferencerBase):
         """Run a single inference step for a batch.
 
         Phase 3: Paged Attention path.
+        Phase 4: Passes VLM images on prefill.
         """
         if self.model is None or self.device is None:
             raise RuntimeError("Model is not loaded. Call load_model() first.")
@@ -203,11 +222,18 @@ class TorchInferencer(InferencerBase):
         context.metadata.v_cache = v_cache
 
         with torch.inference_mode():
+            # Only pass VLM kwargs when the model supports them (images present)
+            extra_kwargs = {}
+            if context.images is not None:
+                extra_kwargs["images"] = context.images
+                extra_kwargs["image_grid_thw"] = context.image_grid_thw
+
             logits = self.model(
                 input_ids=context.input_ids,
                 attention_mask=context.attention_mask,
                 position_ids=context.position_ids,
                 metadata=context.metadata,
+                **extra_kwargs,
             )
 
             # Extract last token logits for every query in the batch
@@ -244,7 +270,6 @@ class TorchInferencer(InferencerBase):
 
     @staticmethod
     def _is_vision_language_model(config: AutoConfig) -> bool:
-        # Check for common VLM model attributes
         if hasattr(config, "vision_config"):
             return True
         architectures = getattr(config, "architectures", []) or []

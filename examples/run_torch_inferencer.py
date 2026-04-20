@@ -5,7 +5,7 @@ import time
 import uuid
 
 import torch
-from nano_inference.core.config import ModelConfig
+from nano_inference.core.config import ModelConfig, RuntimeConfig
 from nano_inference.core.request import Request
 from nano_inference.core.sampling import SamplingParams
 from nano_inference.inferencer.torch_inferencer import TorchInferencer
@@ -21,6 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         default="Who are you?",
         help="Prompt text to tokenize and generate from.",
+    )
+    parser.add_argument(
+        "--image",
+        default=None,
+        help="Image path (for VL models). Activates VLMInputProcessor when set.",
     )
     parser.add_argument(
         "--max-new-tokens",
@@ -68,22 +73,43 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    from nano_inference.core.config import ModelConfig, RuntimeConfig
-
-    runtime_config = RuntimeConfig(
-        model=ModelConfig(
+    inferencer = TorchInferencer()
+    inferencer.load_model(
+        ModelConfig(
             model_dir=args.model_dir,
             device=args.device,
             dtype=args.dtype,
         )
     )
-    inferencer = TorchInferencer()
-    inferencer.load_model(runtime_config.model)
 
-    # Use the input processor for text-only models
-    processor = ChatTemplateInputProcessor(tokenizer=inferencer.tokenizer)
-    messages = [{"role": "user", "content": args.prompt}]
-    gen_inputs = processor.encode(messages)
+    if inferencer.is_vlm:
+        from nano_inference.input_processor.vlm import Qwen25VLInputProcessor
+        from PIL import Image
+
+        input_proc = Qwen25VLInputProcessor(
+            tokenizer=inferencer.tokenizer,
+            processor=inferencer.processor,
+        )
+
+        if args.image:
+            image = Image.open(args.image).convert("RGB")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": args.prompt},
+                    ],
+                }
+            ]
+            gen_inputs = input_proc.encode(messages, images=[image])
+        else:
+            messages = [{"role": "user", "content": args.prompt}]
+            gen_inputs = input_proc.encode(messages)
+    else:
+        input_proc = ChatTemplateInputProcessor(tokenizer=inferencer.tokenizer)
+        messages = [{"role": "user", "content": args.prompt}]
+        gen_inputs = input_proc.encode(messages)
 
     request = Request(
         request_id=f"example-{uuid.uuid4().hex[:8]}",
@@ -103,16 +129,16 @@ def main() -> None:
 
     print("=== Prompt ===")
     print(args.prompt)
+    if args.image:
+        print(f"Image: {args.image}")
     print()
-
-    assembled_text = ""
-    for _, token_id in enumerate(output.output_token_ids, start=1):
-        token_text = inferencer.tokenizer.decode([token_id], skip_special_tokens=False)
-        assembled_text += token_text
 
     print("=== Final Text ===")
-    print(assembled_text)
+    print(
+        inferencer.tokenizer.decode(output.output_token_ids, skip_special_tokens=True)
+    )
     print()
+
     print("=== Finished Reason ===")
     print(
         output.finished_reason.value

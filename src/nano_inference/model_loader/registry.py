@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from nano_inference.model_loader.base import BaseModelLoader
 from nano_inference.model_loader.qwen3 import Qwen3Loader
+from nano_inference.model_loader.qwen25_vl import Qwen25VLLoader
 from transformers import AutoConfig
 
 
 def select_loader(hf_config) -> BaseModelLoader:
+    # Order matters: more specific loaders first
     candidates: list[BaseModelLoader] = [
+        Qwen25VLLoader(),
         Qwen3Loader(),
     ]
     for loader in candidates:

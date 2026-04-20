@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -45,6 +46,23 @@ class RotaryEmbeddingBase(nn.Module, ABC):
         position_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         pass
+
+
+class MRoPEEmbeddingBase(RotaryEmbeddingBase, ABC):
+    """Multi-axis RoPE base for VLM decoder layers.
+
+    Extends RotaryEmbeddingBase to handle 3D position IDs (temporal, height, width).
+    Each axis independently rotates one-third of the head dimension features.
+    Text tokens use all-equal axes → reduces to standard 1D RoPE.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        q: torch.Tensor,  # (B, S, num_heads, head_dim)
+        k: torch.Tensor,
+        position_ids: torch.Tensor,  # (3, B, S) — axis 0=temporal, 1=height, 2=width
+    ) -> Tuple[torch.Tensor, torch.Tensor]: ...
 
 
 class NaiveRotaryEmbedding(RotaryEmbeddingBase):
@@ -108,5 +126,85 @@ class NaiveRotaryEmbedding(RotaryEmbeddingBase):
         # cos/sin Shape: (batch, seq, 1, head_dim)
         cos = emb.cos().to(dtype=q.dtype, device=q.device).unsqueeze(2)
         sin = emb.sin().to(dtype=q.dtype, device=q.device).unsqueeze(2)
+
+        return apply_rotary_pos_emb(q, k, cos, sin)
+
+
+class Qwen25VLLMRotaryEmbedding(MRoPEEmbeddingBase):
+    """Multi-axis RoPE (M-RoPE) for Qwen2.5-VL decoder layers.
+
+    Splits head_dim into 3 sections defined by mrope_section (number of inv_freq
+    dimensions per axis, e.g. [16, 24, 24] for head_dim=128) and applies an
+    independent 1D RoPE rotation to each section using the temporal, height, and
+    width position axes.
+
+    For text tokens all three axes carry the same scalar → output is identical
+    to a standard NaiveRotaryEmbedding call, preserving backward compatibility.
+
+    mrope_section: number of inv_freq (head_dim/2) entries assigned to each axis.
+    Qwen2.5-VL-3B: head_dim=128, mrope_section=[16,24,24] → section_dims=[32,48,48].
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        base: float = 10000.0,
+        mrope_section: Tuple[int, int, int] = (16, 24, 24),
+    ):
+        super().__init__(head_dim, base)
+        self.head_dim = head_dim
+        self.base = base
+        # Convert freq-count per axis to actual dimension sizes (×2 because each
+        # inv_freq entry covers 2 dimensions via the rotate_half construction).
+        n0, n1, n2 = mrope_section
+        assert (
+            n0 + n1 + n2 == head_dim // 2
+        ), f"mrope_section {mrope_section} must sum to head_dim//2={head_dim//2}"
+        self._section_dims = (n0 * 2, n1 * 2, n2 * 2)
+        self._section_freqs = (n0, n1, n2)
+
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _rotate_section(
+        self,
+        x_section: torch.Tensor,  # (B, S, H, section_dim)
+        pos: torch.Tensor,  # (B, S)
+        inv_freq_slice: torch.Tensor,  # (section_dim/2,)
+    ) -> torch.Tensor:
+        # freqs: (B, S, section_dim/2)
+        freqs = pos.float().unsqueeze(-1) * inv_freq_slice
+        emb = torch.cat((freqs, freqs), dim=-1)  # (B, S, section_dim)
+        cos = emb.cos().to(x_section.dtype).unsqueeze(2)  # (B, S, 1, section_dim)
+        sin = emb.sin().to(x_section.dtype).unsqueeze(2)
+        return x_section * cos + rotate_half(x_section) * sin
+
+    def forward(
+        self,
+        q: torch.Tensor,  # (B, S, num_heads, head_dim)
+        k: torch.Tensor,
+        position_ids: torch.Tensor,  # (3, B, S)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        n0, n1, _ = self._section_freqs
+        pos_t, pos_h, pos_w = position_ids[0], position_ids[1], position_ids[2]
+
+        # Build full freq vector by concatenating per-axis sections:
+        # freqs[..., :n0]     = pos_t * inv_freq[:n0]     (temporal section)
+        # freqs[..., n0:n0+n1] = pos_h * inv_freq[n0:n0+n1] (height section)
+        # freqs[..., n0+n1:]  = pos_w * inv_freq[n0+n1:]  (width section)
+        # This ensures text tokens (all axes equal) reproduce standard 1D RoPE.
+        freqs = torch.cat(
+            [
+                pos_t.float().unsqueeze(-1) * self.inv_freq[:n0],
+                pos_h.float().unsqueeze(-1) * self.inv_freq[n0 : n0 + n1],
+                pos_w.float().unsqueeze(-1) * self.inv_freq[n0 + n1 :],
+            ],
+            dim=-1,
+        )  # (B, S, head_dim // 2)
+        emb = torch.cat([freqs, freqs], dim=-1)  # (B, S, head_dim)
+        cos = emb.cos().to(q.dtype).unsqueeze(2)  # (B, S, 1, head_dim)
+        sin = emb.sin().to(q.dtype).unsqueeze(2)
 
         return apply_rotary_pos_emb(q, k, cos, sin)

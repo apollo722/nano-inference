@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
 
 import torch
 
@@ -20,12 +20,16 @@ class AttentionMetadata:
     # Forward Mode
     is_prefill: bool = False
 
+    # VLM-only: 3-axis mRoPE position IDs; shape (3, B, S_step).  None for text-only.
+    mrope_position_ids: Optional[torch.Tensor] = None
+
 
 @dataclass
 class GenerateContext:
     """Batch-level context for a single inference step.
 
     Phase 3: Now uses AttentionMetadata for Paged Attention.
+    Phase 4: Extended with VLM image fields.
     """
 
     # Model Inputs
@@ -40,3 +44,8 @@ class GenerateContext:
     request_ids: List[str]
     # Phase 3+: Full token history per request (prompt + generated) for sampler
     token_histories: List[List[int]]
+
+    # Phase 4 VLM: raw PIL images and grid info for the prefill ViT pass.
+    # Both are None during DECODE (KV cache already holds visual K/V).
+    images: Optional[List[Any]] = None
+    image_grid_thw: Optional[List[Tuple[int, int, int]]] = None

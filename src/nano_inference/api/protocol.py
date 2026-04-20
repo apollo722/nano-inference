@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,16 @@ class CompletionRequest(BaseModel):
     stream: Optional[bool] = Field(False, description="Whether to stream output.")
 
 
+class ContentPart(BaseModel):
+    """A single content part in a multi-modal message (OpenAI vision API format)."""
+
+    type: str = Field(description="Content type: 'text' or 'image_url'.")
+    text: Optional[str] = Field(None, description="Text content (when type='text').")
+    image_url: Optional[Dict[str, str]] = Field(
+        None, description="Image reference (when type='image_url'): {'url': '...'}."
+    )
+
+
 class CompletionChoice(BaseModel):
     """A single completion choice."""
 
@@ -33,12 +43,18 @@ class CompletionChoice(BaseModel):
 
 
 class ChatCompletionMessage(BaseModel):
-    """A single message in a chat conversation."""
+    """A single message in a chat conversation.
+
+    Content may be a plain string (text-only) or a list of ContentPart objects
+    (multi-modal, e.g. text + image_url).
+    """
 
     role: str = Field(
         description="The role of the message author (system, user, assistant)."
     )
-    content: str = Field(description="The content of the message.")
+    content: Union[str, List[ContentPart]] = Field(
+        description="Message content: string or list of content parts."
+    )
 
 
 class ChatCompletionRequest(BaseModel):

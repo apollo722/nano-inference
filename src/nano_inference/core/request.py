@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import torch
 
 from .sampling import SamplingParams
 
@@ -11,6 +13,10 @@ class GenerationInputs:
     generate_kwargs: Dict[str, Any] = field(default_factory=dict)
     images: Optional[List[Any]] = None
     videos: Optional[List[Any]] = None
+    # VLM-only: (T, H_patches, W_patches) before 2x spatial merge, one per image
+    image_grid_thw: Optional[List[Tuple[int, int, int]]] = None
+    # VLM-only: 3-axis RoPE positions; shape (3, seq_len).  None for text-only.
+    mrope_position_ids: Optional[torch.Tensor] = None
 
 
 @dataclass
