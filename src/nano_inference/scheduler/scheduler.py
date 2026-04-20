@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -107,11 +108,12 @@ class OrcaScheduler(SchedulerBase):
                 )
 
                 # Routing logic:
-                # 1. If explicitly in PREFILL stage AND hasn't processed anything yet, it's a prefill.
-                # 2. If it has already processed tokens, it MUST be a decode (rescheduled).
-                # 3. Otherwise, follow the stage (could be a new request starting at DECODE).
+                # 1. If explicitly in PREFILL stage OR RECOMPUTE stage AND hasn't processed anything yet (for prefill)
+                #    OR needs recomputation, it's treated like a prefill.
+                # 2. If it has already processed tokens (and NOT in RECOMPUTE), it MUST be a decode (rescheduled).
+                # 3. Otherwise, follow the stage.
                 if (
-                    query.stage == GenerationStage.PREFILL
+                    query.stage in (GenerationStage.PREFILL, GenerationStage.RECOMPUTE)
                     and query.computed_length == 0
                 ):
                     if query not in self._prefill_waiting:
@@ -185,16 +187,21 @@ class OrcaScheduler(SchedulerBase):
             ):
                 query = self._prefill_waiting.popleft()
 
-                # Allocate initial blocks for prefill
+                # Allocate initial blocks for prefill / recompute
                 if self.allocator:
-                    prompt_len = len(query.generation_inputs.prompt_token_ids)
+                    # In RECOMPUTE, we need enough space for Prompt + all previously generated tokens + 1 new token
+                    # In PREFILL, just Prompt + 1 new token
+                    sequence_len = len(query.generation_inputs.prompt_token_ids)
+                    if query.stage == GenerationStage.RECOMPUTE:
+                        sequence_len += len(query.output_token_ids)
+
                     try:
                         if query.kv_cache_block is None:
                             query.kv_cache_block = self.allocator.allocate(
-                                prompt_len + 1
+                                sequence_len + 1
                             )
-                        elif query.kv_cache_block.capacity < (prompt_len + 1):
-                            needed = (prompt_len + 1) - query.kv_cache_block.capacity
+                        elif query.kv_cache_block.capacity < (sequence_len + 1):
+                            needed = (sequence_len + 1) - query.kv_cache_block.capacity
                             num_blocks_needed = math.ceil(
                                 needed / query.kv_cache_block.block_size
                             )
@@ -206,7 +213,7 @@ class OrcaScheduler(SchedulerBase):
                                 )
                     except RuntimeError as e:
                         logger.warning(
-                            f"[Scheduler] Delaying prefill for {query.request_id}: {e}"
+                            f"[Scheduler] Delaying prefill/recompute for {query.request_id}: {e}"
                         )
                         self._prefill_waiting.appendleft(query)
                         break
@@ -248,21 +255,23 @@ class OrcaScheduler(SchedulerBase):
         return False
 
     def preempt_request(self, request_id: str) -> None:
-        """Preempt a request: free its KV cache and reset to prefill stage."""
+        """Preempt a request: free its KV cache and reset to RECOMPUTE stage."""
         query = self._queries.get(request_id)
         if not query:
             return
 
-        logger.info(f"[Scheduler] Preempting request {request_id} (recompute strategy)")
+        logger.info(
+            f"[Scheduler] Preempting request {request_id} (logical history preserved)"
+        )
 
         # 1. Free KV Cache
         if self.allocator and query.kv_cache_block:
             self.allocator.free(query.kv_cache_block)
             query.kv_cache_block = None
 
-        # 2. Reset Query State for recompute
-        query.stage = GenerationStage.PREFILL
-        query.output_token_ids = []
+        # 2. Set Query State for RECOMPUTE (do NOT clear output_token_ids)
+        query.stage = GenerationStage.RECOMPUTE
+        # We also reset computed_length to 0 as we'll rebuild from the prompt
         query.computed_length = 0
 
         # 3. Move back to prefill waiting queue (at the front so it's prioritized later)

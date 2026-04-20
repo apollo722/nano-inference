@@ -18,11 +18,11 @@ class GenerateContextBuilder:
         if not queries:
             raise ValueError("Cannot build context for empty queries list.")
 
-        # 1. Determine if this is a PREFILL or DECODE step
-        # Note: Phase 2/3 currently handles batches where all are in the same stage
-        # or mixed but we treat them uniformly in the context for now.
-        # If any query is PREFILL, we treat the batch as prefill-heavy.
-        is_prefill = any(q.stage == GenerationStage.PREFILL for q in queries)
+        # 1. Determine if this is a PREFILL/RECOMPUTE or DECODE step
+        is_prefill = any(
+            q.stage in (GenerationStage.PREFILL, GenerationStage.RECOMPUTE)
+            for q in queries
+        )
 
         batch_size = len(queries)
 
@@ -32,6 +32,11 @@ class GenerateContextBuilder:
             if q.stage == GenerationStage.PREFILL:
                 # Full prompt for prefill
                 all_step_token_ids.append(q.generation_inputs.prompt_token_ids)
+            elif q.stage == GenerationStage.RECOMPUTE:
+                # Prompt + existing outputs to rebuild cache
+                all_step_token_ids.append(
+                    q.generation_inputs.prompt_token_ids + q.output_token_ids
+                )
             else:
                 # Only the last generated token for decode
                 all_step_token_ids.append([q.output_token_ids[-1]])

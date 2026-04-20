@@ -24,6 +24,7 @@ class Request:
 
 class GenerationStage(Enum):
     PREFILL = "prefill"
+    RECOMPUTE = "recompute"
     DECODE = "decode"
     FINISHED = "finished"
 

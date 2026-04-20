@@ -27,9 +27,16 @@ class OutputProcessor:
             # 1. Update KV Cache tracking
             if query.kv_cache_block:
                 if query.stage == GenerationStage.PREFILL:
-                    # In prefill, we just added all prompt tokens
+                    # In prefill, we added Prompt + 1 new token
+                    query.kv_cache_block.append_tokens(
+                        len(query.generation_inputs.prompt_token_ids) + 1
+                    )
+                elif query.stage == GenerationStage.RECOMPUTE:
+                    # In recompute, we added Prompt + existing outputs + 1 new token
                     query.kv_cache_block.append_tokens(
                         len(query.generation_inputs.prompt_token_ids)
+                        + len(query.output_token_ids)
+                        + 1
                     )
                 else:
                     # In decode, we just added one token
@@ -50,8 +57,8 @@ class OutputProcessor:
             query.full_text = "".join(query.output_text_list)
             query.previous_tokens_len = len(query.output_token_ids)
 
-            # 3. Transition PREFILL -> DECODE if necessary
-            if query.stage == GenerationStage.PREFILL:
+            # 3. Transition to DECODE if we just finished a PREFILL or RECOMPUTE step
+            if query.stage in (GenerationStage.PREFILL, GenerationStage.RECOMPUTE):
                 query.stage = GenerationStage.DECODE
 
             # 4. Check for stop conditions
