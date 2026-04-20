@@ -30,6 +30,16 @@ def test_output_processor_appends_token_and_transitions_stage():
     # After first step (prefill complete)
     processor.process_step_outputs([q], [10])
 
+    # Stage should NOT transition yet (until record_step)
+    assert q.stage == GenerationStage.PREFILL
+
+    # Simulate record_step logic
+    from nano_inference.scheduler.scheduler import OrcaScheduler
+
+    scheduler = OrcaScheduler()
+    scheduler.add_tasks([q])
+    scheduler.record_step([q], 1)
+
     assert q.stage == GenerationStage.DECODE
     assert q.output_token_ids == [10]
     # computed_length should be prompt_len (3) + output_len (1) = 4

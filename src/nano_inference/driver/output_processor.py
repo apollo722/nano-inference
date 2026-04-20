@@ -57,11 +57,7 @@ class OutputProcessor:
             query.full_text = "".join(query.output_text_list)
             query.previous_tokens_len = len(query.output_token_ids)
 
-            # 3. Transition to DECODE if we just finished a PREFILL or RECOMPUTE step
-            if query.stage in (GenerationStage.PREFILL, GenerationStage.RECOMPUTE):
-                query.stage = GenerationStage.DECODE
-
-            # 4. Check for stop conditions
+            # 3. Check for stop conditions
             if self._is_eos_token(token_id, query.eos_token_id):
                 query.stage = GenerationStage.FINISHED
                 query.finished_reason = FinishedReason.STOP
